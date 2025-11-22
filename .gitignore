@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# ESP-IDF build artifacts
+build/
+sdkconfig.old
+*.bin
+*.elf
+*.map
+
+# Exception: Track firmware images in FirmwareImages directory
+!FirmwareImages/*.bin
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+bootlog.txt
+
+# Backup files
+*.bak
+*.backup
+
+# Temporary files
+*.tmp
+
