@@ -37,10 +37,6 @@ This project implements a full-featured EtherNet/IP adapter device on the ESP32-
   - URL-based downloads
   - Automatic rollback on failure
 
-- **MCP230XX I/O Expander Support**: Configurable I/O expander integration
-  - Support for MCP23017 (16-bit) and MCP23008 (8-bit)
-  - Configurable pin directions
-  - Assembly data mapping
 
 - **RFC 5227 Compliant Network Configuration**: Address Conflict Detection (ACD)
   - RFC 5227 compliant static IP assignment
@@ -51,7 +47,7 @@ This project implements a full-featured EtherNet/IP adapter device on the ESP32-
 
 - **Microcontroller**: ESP32-P4
 - **Ethernet PHY**: IP101 (or compatible)
-- **I2C Devices**: Optional MPU6050, MCP230XX I/O expanders
+- **I2C Devices**: Optional MPU6050 IMU sensor
 - **GPIO Configuration**:
   - Ethernet: MDC, MDIO, PHY Reset (configurable)
   - I2C: SDA, SCL (configurable, defaults GPIO7/GPIO8)
@@ -153,29 +149,19 @@ Configuration via web API:
 - Set byte offset in Input Assembly 100 (0-20, uses 20 bytes)
 - View real-time readings
 
-#### MCP230XX I/O Expanders
-
-Configure I/O expanders via web interface:
-- Device type (MCP23017 or MCP23008)
-- I2C address (0x20-0x27)
-- Pin directions (input/output)
-- Assembly data mapping
-- Logic inversion
 
 ### EtherNet/IP Configuration
 
 The device exposes three assembly instances:
 
 - **Assembly 100 (Input)**: 32 bytes of input data
-  - MPU6050 sensor data (configurable offset)
-  - MCP230XX input data (configurable)
-  - Other sensor data
+  - MPU6050 sensor data (configurable offset, 20 bytes)
+  - Available space for other sensor data
 
 - **Assembly 150 (Output)**: 32 bytes of output data
   - Tool weight (byte 30)
   - Tip force (byte 31)
-  - MCP230XX output data (configurable)
-  - Control commands
+  - Control commands and other output data (bytes 0-29)
 
 - **Assembly 151 (Configuration)**: 10 bytes for configuration
 
@@ -183,6 +169,8 @@ Connection types supported:
 - **Exclusive Owner**: Bidirectional I/O connection
 - **Input Only**: Unidirectional input connection
 - **Listen Only**: Unidirectional input connection (multicast)
+
+**For detailed byte-by-byte assembly data layout, see [docs/ASSEMBLY_DATA_LAYOUT.md](docs/ASSEMBLY_DATA_LAYOUT.md).**
 
 ## Web Interface
 
@@ -209,8 +197,11 @@ The device provides a Modbus TCP server on port 502:
 
 - **Holding Registers** (0x03, 0x06, 0x10 function codes):
   - 100-115: Maps to Output Assembly 150 (32 bytes = 16 registers)
+  - 150-154: Maps to Configuration Assembly 151 (10 bytes = 5 registers)
 
-All data is stored in little-endian format.
+All assembly data is stored in little-endian format (Modbus converts to big-endian for transmission).
+
+**For detailed register-to-byte mapping, see [docs/ASSEMBLY_DATA_LAYOUT.md](docs/ASSEMBLY_DATA_LAYOUT.md).**
 
 ## EtherNet/IP EDS File
 
