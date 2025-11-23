@@ -470,7 +470,12 @@ void CheckAndHandleTcpListenerSocket(void) {
     } OPENER_TRACE_INFO(">>> network handler: accepting new TCP socket: %d \n",
                         new_socket);
 
-    /* Disable Nagle's algorithm for low latency EtherNet/IP explicit messaging */
+    /* MODIFICATION: Disable Nagle's algorithm for low latency EtherNet/IP explicit messaging
+     * Added by: Adam G. Sweeney <agsweeney@gmail.com>
+     * Rationale: Nagle's algorithm can delay small packets, increasing latency for
+     * EtherNet/IP explicit messaging. Disabling TCP_NODELAY ensures immediate packet
+     * transmission, improving real-time performance for industrial communication.
+     */
     int flag = 1;
     if(setsockopt(new_socket, IPPROTO_TCP, TCP_NODELAY, (char *)&flag, sizeof(flag)) < 0) {
       int error_code = GetSocketErrorNumber();

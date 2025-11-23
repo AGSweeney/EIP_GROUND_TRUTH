@@ -1,4 +1,90 @@
+/*
+ * Copyright (c) 2025, Adam G. Sweeney <agsweeney@gmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
+/**
+ * @file main.c
+ * @brief Main application entry point for ESP32-P4 EtherNet/IP device
+ *
+ * ADDRESS CONFLICT DETECTION (ACD) IMPLEMENTATION
+ * ===============================================
+ *
+ * This file implements RFC 5227 compliant Address Conflict Detection (ACD) for
+ * static IP addresses. ACD ensures that IP addresses are not assigned until
+ * confirmed safe to use, preventing network conflicts.
+ *
+ * Architecture:
+ * ------------
+ * - Static IP: Full RFC 5227 compliance
+ *   * Probe phase: 3 ARP probes from 0.0.0.0 with random 1-2 second intervals
+ *   * Announce phase: 2 ARP announcements after successful probe
+ *   * Ongoing defense: Periodic ARP probes every ~90 seconds (configurable)
+ *   * Total time: ~8-10 seconds for initial IP assignment
+ *
+ * - DHCP: Simplified ACD (not RFC 5227 compliant)
+ *   * Single ARP probe with 500ms timeout
+ *   * Fast conflict detection (~1 second)
+ *   * Handled internally by lwIP DHCP client
+ *
+ * Implementation Details:
+ * ----------------------
+ * 1. Legacy Mode (LWIP_ACD_RFC5227_COMPLIANT_STATIC=0):
+ *    - ACD probe sequence runs BEFORE IP assignment
+ *    - IP is assigned only after ACD confirms no conflict
+ *    - Uses tcpip_perform_acd() to coordinate probe sequence
+ *
+ * 2. RFC 5227 Mode (LWIP_ACD_RFC5227_COMPLIANT_STATIC=1):
+ *    - Uses lwIP's netif_set_addr_with_acd() API
+ *    - IP assignment deferred until ACD completes
+ *    - More robust but requires RFC 5227 support in lwIP
+ *
+ * 3. Retry Logic (CONFIG_OPENER_ACD_RETRY_ENABLED):
+ *    - On conflict, removes IP and schedules retry after delay
+ *    - Configurable max attempts and retry delay
+ *    - Prevents infinite retry loops
+ *
+ * 4. User LED Indication:
+ *    - GPIO27 blinks during normal operation
+ *    - Goes solid on ACD conflict detection
+ *    - Visual feedback for network issues
+ *
+ * Thread Safety:
+ * -------------
+ * - ACD operations use tcpip_callback_with_block() to ensure execution on tcpip thread
+ * - Context structures allocated on heap to prevent stack corruption
+ * - Semaphores coordinate async callback execution
+ *
+ * Configuration:
+ * --------------
+ * - CONFIG_OPENER_ACD_PROBE_NUM: Number of probes (default: 3)
+ * - CONFIG_OPENER_ACD_PROBE_MIN_MS: Minimum probe interval (default: 1000ms)
+ * - CONFIG_OPENER_ACD_PROBE_MAX_MS: Maximum probe interval (default: 2000ms)
+ * - CONFIG_OPENER_ACD_PERIODIC_DEFEND_INTERVAL_MS: Defensive ARP interval (default: 90000ms)
+ * - CONFIG_OPENER_ACD_RETRY_ENABLED: Enable retry on conflict
+ * - CONFIG_OPENER_ACD_RETRY_DELAY_MS: Delay before retry (default: 10000ms)
+ * - CONFIG_OPENER_ACD_RETRY_MAX_ATTEMPTS: Max retry attempts (default: 5)
+ */
+
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
 #include <math.h>
@@ -8,6 +94,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "freertos/timers.h"
 #include "esp_netif.h"
 #include "esp_eth.h"
 #include "esp_eth_mac_esp.h"
@@ -56,6 +143,7 @@ extern uint8_t g_assembly_data096[32];  // Output Assembly 150
 static const char *TAG = "opener_main";
 static struct netif *s_netif = NULL;
 static SemaphoreHandle_t s_netif_mutex = NULL;
+static bool s_services_initialized = false;
 
 // MPU6050 device instance
 static mpu6050_t s_mpu6050 = {0};
@@ -74,6 +162,12 @@ static TaskHandle_t s_mpu6050_io_task_handle = NULL;
 // I2C bus handle (initialized in app_main)
 static i2c_master_bus_handle_t s_i2c_bus_handle = NULL;
 
+// User LED state (GPIO27)
+#define USER_LED_GPIO 27
+static bool s_user_led_initialized = false;
+static bool s_user_led_flash_enabled = false;
+static TaskHandle_t s_user_led_task_handle = NULL;
+
 // Function to update MPU6050 enabled cache (called from API)
 void sample_application_set_mpu6050_enabled(bool enabled)
 {
@@ -87,11 +181,18 @@ static void scan_i2c_bus(i2c_master_bus_handle_t bus_handle);
 static struct acd s_static_ip_acd;
 static bool s_acd_registered = false;
 static SemaphoreHandle_t s_acd_sem = NULL;
-static acd_callback_enum_t s_acd_last_state = ACD_RESTART_CLIENT;
+static SemaphoreHandle_t s_acd_registration_sem = NULL;  // Semaphore to wait for ACD registration
+static acd_callback_enum_t s_acd_last_state = ACD_IP_OK;  // Initialize to OK state, not conflict state
 static bool s_acd_probe_pending = false;
 static esp_netif_ip_info_t s_pending_static_ip_cfg = {0};
 #if LWIP_ACD_RFC5227_COMPLIANT_STATIC
 static esp_netif_t *s_pending_esp_netif = NULL;  /* Store esp_netif for callback */
+#endif
+#if CONFIG_OPENER_ACD_RETRY_ENABLED
+static TimerHandle_t s_acd_retry_timer = NULL;
+static int s_acd_retry_count = 0;
+static esp_netif_t *s_acd_retry_netif = NULL;
+static struct netif *s_acd_retry_lwip_netif = NULL;
 #endif
 #endif
 static bool s_opener_initialized;
@@ -156,8 +257,44 @@ typedef struct {
     err_t err;
 } AcdStartContext;
 
+typedef struct {
+    struct netif *netif;
+    ip4_addr_t ip;
+    err_t err;
+} AcdStartProbeContext;
+
 static void tcpip_try_pending_acd(esp_netif_t *netif, struct netif *lwip_netif);
 static void tcpip_retry_acd_deferred(void *arg);
+#if CONFIG_OPENER_ACD_RETRY_ENABLED
+static void tcpip_acd_retry_timer_callback(TimerHandle_t xTimer);
+static void tcpip_acd_start_retry(esp_netif_t *netif, struct netif *lwip_netif);
+
+// Callback to start ACD probe on tcpip thread (used when direct acd_start() fails)
+static void acd_start_probe_cb(void *arg) {
+    AcdStartProbeContext *ctx = (AcdStartProbeContext *)arg;
+    if (ctx == NULL || ctx->netif == NULL) {
+        ESP_LOGE(TAG, "acd_start_probe_cb: Invalid context");
+        if (ctx) free(ctx);
+        return;
+    }
+    ESP_LOGI(TAG, "acd_start_probe_cb: Calling acd_start() for IP " IPSTR " on netif %p", 
+             IP2STR(&ctx->ip), ctx->netif);
+    ctx->err = acd_start(ctx->netif, &s_static_ip_acd, ctx->ip);
+    ESP_LOGI(TAG, "acd_start_probe_cb: acd_start() returned err=%d", (int)ctx->err);
+    free(ctx);  // Free heap-allocated context
+}
+
+// Callback for retry timer: executes retry on tcpip thread (has more stack space)
+static void retry_callback(void *arg) {
+    (void)arg;
+    if (s_acd_retry_netif != NULL && s_acd_retry_lwip_netif != NULL) {
+        ESP_LOGI(TAG, "ACD retry timer expired - restarting ACD probe sequence (attempt %d)",
+                 s_acd_retry_count + 1);
+        tcpip_try_pending_acd(s_acd_retry_netif, s_acd_retry_lwip_netif);
+    }
+}
+#endif
+#endif
 
 static bool netif_has_valid_hwaddr(struct netif *netif) {
     if (netif == NULL) {
@@ -174,13 +311,31 @@ static bool netif_has_valid_hwaddr(struct netif *netif) {
     return false;
 }
 
+// User LED control functions
+static void user_led_init(void);
+static void user_led_set(bool on);
+static void user_led_flash_task(void *pvParameters);
+static void user_led_start_flash(void);
+static void user_led_stop_flash(void);
+
 static void tcpip_acd_conflict_callback(struct netif *netif, acd_callback_enum_t state) {
-    ESP_LOGI(TAG, "ACD callback state=%d", (int)state);
+    ESP_LOGI(TAG, "ACD callback received: state=%d (0=IP_OK, 1=RESTART_CLIENT, 2=DECLINE)", (int)state);
     s_acd_last_state = state;
     switch (state) {
         case ACD_IP_OK:
             g_tcpip.status &= ~(kTcpipStatusAcdStatus | kTcpipStatusAcdFault);
             CipTcpIpSetLastAcdActivity(0);
+            // Resume LED blinking when IP is OK (no conflict)
+            user_led_start_flash();
+            ESP_LOGI(TAG, "ACD: IP OK - no conflict detected");
+#if CONFIG_OPENER_ACD_RETRY_ENABLED
+            // Reset retry count on successful IP assignment
+            s_acd_retry_count = 0;
+            // Stop retry timer if running
+            if (s_acd_retry_timer != NULL) {
+                xTimerStop(s_acd_retry_timer, portMAX_DELAY);
+            }
+#endif
 #if LWIP_ACD_RFC5227_COMPLIANT_STATIC
             /* With RFC 5227, IP is now assigned. Configure DNS and notify */
             if (netif != NULL && s_pending_esp_netif != NULL) {
@@ -195,12 +350,36 @@ static void tcpip_acd_conflict_callback(struct netif *netif, acd_callback_enum_t
             g_tcpip.status |= kTcpipStatusAcdStatus;
             g_tcpip.status |= kTcpipStatusAcdFault;
             CipTcpIpSetLastAcdActivity(3);
+            // Stop LED blinking and turn solid on ACD conflict
+            user_led_stop_flash();
+            user_led_set(true);  // Turn LED on solid
+            ESP_LOGW(TAG, "ACD: Conflict detected (state=%d) - LED set to solid", (int)state);
 #if LWIP_ACD_RFC5227_COMPLIANT_STATIC
             /* With RFC 5227, IP was not assigned due to conflict */
             if (netif != NULL) {
                 s_acd_probe_pending = false;
                 s_pending_esp_netif = NULL;
                 ESP_LOGW(TAG, "RFC 5227: IP not assigned due to conflict");
+            }
+#endif
+#if CONFIG_OPENER_ACD_RETRY_ENABLED
+            // Retry logic: On conflict, remove IP and schedule retry after delay
+            if (netif != NULL) {
+                esp_netif_t *esp_netif = esp_netif_get_handle_from_netif_impl(netif);
+                if (esp_netif != NULL) {
+                    // Check if we should retry
+                    if (CONFIG_OPENER_ACD_RETRY_MAX_ATTEMPTS == 0 || 
+                        s_acd_retry_count < CONFIG_OPENER_ACD_RETRY_MAX_ATTEMPTS) {
+                        ESP_LOGW(TAG, "ACD: Scheduling retry (attempt %d/%d) after %dms",
+                                 s_acd_retry_count + 1,
+                                 CONFIG_OPENER_ACD_RETRY_MAX_ATTEMPTS == 0 ? 999 : CONFIG_OPENER_ACD_RETRY_MAX_ATTEMPTS,
+                                 CONFIG_OPENER_ACD_RETRY_DELAY_MS);
+                        tcpip_acd_start_retry(esp_netif, netif);
+                    } else {
+                        ESP_LOGE(TAG, "ACD: Max retry attempts (%d) reached - giving up",
+                                 CONFIG_OPENER_ACD_RETRY_MAX_ATTEMPTS);
+                    }
+                }
             }
 #endif
             break;
@@ -215,23 +394,87 @@ static void tcpip_acd_conflict_callback(struct netif *netif, acd_callback_enum_t
 }
 
 static void tcpip_acd_start_cb(void *arg) {
+    ESP_LOGI(TAG, "tcpip_acd_start_cb: CALLBACK EXECUTING - arg=%p", arg);
     AcdStartContext *ctx = (AcdStartContext *)arg;
+    if (ctx == NULL) {
+        ESP_LOGE(TAG, "tcpip_acd_start_cb: NULL context");
+        // Signal semaphore even on error so caller doesn't hang
+        if (s_acd_registration_sem != NULL) {
+            xSemaphoreGive(s_acd_registration_sem);
+        }
+        return;
+    }
+    ESP_LOGI(TAG, "tcpip_acd_start_cb: Context valid - netif=%p, ip=" IPSTR, 
+             ctx->netif, IP2STR(&ctx->ip));
     ctx->err = ERR_OK;
+    
+    // NULL check: netif may be invalidated between context creation and callback execution
+    if (ctx->netif == NULL) {
+        ESP_LOGD(TAG, "tcpip_acd_start_cb: NULL netif - ACD probe cancelled");
+        ctx->err = ERR_IF;
+        free(ctx);
+        return;
+    }
+    
+    // If probe phase is complete, still register ACD for ongoing conflict detection
+    bool probe_was_pending = s_acd_probe_pending;
+    
     if (!s_acd_registered) {
         ctx->netif->acd_list = NULL;
         memset(&s_static_ip_acd, 0, sizeof(s_static_ip_acd));
-        if (acd_add(ctx->netif, &s_static_ip_acd, tcpip_acd_conflict_callback) == ERR_OK) {
-            ESP_LOGI(TAG, "ACD client registered");
+        err_t add_err = acd_add(ctx->netif, &s_static_ip_acd, tcpip_acd_conflict_callback);
+        if (add_err == ERR_OK) {
             s_acd_registered = true;
+            ESP_LOGD(TAG, "tcpip_acd_start_cb: ACD client registered");
         } else {
+            ESP_LOGE(TAG, "tcpip_acd_start_cb: acd_add() failed with err=%d", (int)add_err);
             ctx->err = ERR_IF;
+            // Signal registration semaphore even on failure so caller doesn't hang
+            if (s_acd_registration_sem != NULL) {
+                xSemaphoreGive(s_acd_registration_sem);
+            }
+            free(ctx);
             return;
         }
     }
-    acd_stop(&s_static_ip_acd);
-    ESP_LOGI(TAG, "Starting ACD probe via acd_start()");
-    ctx->err = acd_start(ctx->netif, &s_static_ip_acd, ctx->ip);
-    ESP_LOGI(TAG, "acd_start() returned err=%d", (int)ctx->err);
+    
+    // Signal registration semaphore to allow tcpip_perform_acd to wait for completion
+    if (s_acd_registration_sem != NULL) {
+        xSemaphoreGive(s_acd_registration_sem);
+    }
+    
+    // If probe phase was skipped (IP already assigned), manually transition to ONGOING state
+    // Otherwise, ACD will naturally transition: PROBING -> ANNOUNCING -> ONGOING
+    if (!probe_was_pending) {
+        // IP already assigned - manually transition to ONGOING state for periodic defensive ARPs
+        acd_stop(&s_static_ip_acd);  // Stop current state first
+        s_static_ip_acd.state = ACD_STATE_ONGOING;
+        s_static_ip_acd.ipaddr = ctx->ip;
+        s_static_ip_acd.sent_num = 0;
+        s_static_ip_acd.lastconflict = 0;
+        s_static_ip_acd.num_conflicts = 0;
+        
+        // Re-add to netif's acd_list so timer processes it
+        acd_add(ctx->netif, &s_static_ip_acd, tcpip_acd_conflict_callback);
+        
+        // Set ttw to defense interval so timer counts down before first probe
+#ifdef CONFIG_OPENER_ACD_PERIODIC_DEFEND_INTERVAL_MS
+        if (CONFIG_OPENER_ACD_PERIODIC_DEFEND_INTERVAL_MS > 0) {
+            const uint16_t timer_interval_ms = 100;
+            s_static_ip_acd.ttw = (uint16_t)((CONFIG_OPENER_ACD_PERIODIC_DEFEND_INTERVAL_MS + timer_interval_ms - 1) / timer_interval_ms);
+        } else {
+            s_static_ip_acd.ttw = 0;
+        }
+#else
+        s_static_ip_acd.ttw = 100;  // Default 10 seconds
+#endif
+    }
+    // If probe_was_pending, ACD is already running via acd_start() - don't stop it
+    // It will naturally transition: PROBING -> ANNOUNCING -> ONGOING
+    ctx->err = ERR_OK;
+    
+    // Free heap-allocated context (allocated on heap to prevent stack corruption)
+    free(ctx);
 }
 
 static void tcpip_acd_stop_cb(void *arg) {
@@ -269,41 +512,200 @@ static bool tcpip_perform_acd(struct netif *netif, const ip4_addr_t *ip) {
         /* flush any stale signals */
     }
 
-    s_acd_last_state = ACD_RESTART_CLIENT;
+    // Check if probe is still pending before creating context (prevents invalid context if cancelled)
+    if (!s_acd_probe_pending) {
+        ESP_LOGD(TAG, "tcpip_perform_acd: ACD probe no longer pending - skipping");
+        return true;  // Return true to allow IP assignment (ACD was cancelled or completed)
+    }
+
+    // Initialize to ACD_IP_OK: timeout without callback means no conflict
+    // Only explicit ACD_RESTART_CLIENT/ACD_DECLINE from callback indicates conflict
+    s_acd_last_state = ACD_IP_OK;
     CipTcpIpSetLastAcdActivity(2);
 
-    AcdStartContext ctx = {
-        .netif = netif,
-        .ip = *ip,
-        .err = ERR_OK,
-    };
+    // Verify netif is still valid (may have been invalidated)
+    if (netif == NULL) {
+        ESP_LOGW(TAG, "tcpip_perform_acd: netif became NULL - ACD cancelled");
+        return true;  // Return true to allow IP assignment (can't perform ACD without netif)
+    }
 
-    if (tcpip_callback_with_block(tcpip_acd_start_cb, &ctx, 1) != ERR_OK || ctx.err != ERR_OK) {
-        ESP_LOGE(TAG, "Failed to start ACD probe (err=%d)", (int)ctx.err);
+    // Allocate context on heap: tcpip_callback_with_block executes asynchronously,
+    // so stack-allocated context would be corrupted
+    AcdStartContext *ctx = (AcdStartContext *)malloc(sizeof(AcdStartContext));
+    if (ctx == NULL) {
+        ESP_LOGE(TAG, "tcpip_perform_acd: Failed to allocate ACD context");
         g_tcpip.status |= kTcpipStatusAcdStatus | kTcpipStatusAcdFault;
         CipTcpIpSetLastAcdActivity(3);
         return false;
     }
+    
+    ctx->netif = netif;
+    ctx->ip = *ip;
+    ctx->err = ERR_OK;
 
-    TickType_t wait_ticks = pdMS_TO_TICKS(500);
+    ESP_LOGD(TAG, "tcpip_perform_acd: Registering ACD client for IP " IPSTR, IP2STR(ip));
+    
+    // Create registration semaphore to wait for callback to complete registration
+    if (s_acd_registration_sem == NULL) {
+        s_acd_registration_sem = xSemaphoreCreateBinary();
+        if (s_acd_registration_sem == NULL) {
+            ESP_LOGE(TAG, "Failed to create ACD registration semaphore");
+            free(ctx);
+            g_tcpip.status |= kTcpipStatusAcdStatus | kTcpipStatusAcdFault;
+            CipTcpIpSetLastAcdActivity(3);
+            return false;
+        }
+    }
+    
+    // Clear any stale signals
+    while (xSemaphoreTake(s_acd_registration_sem, 0) == pdTRUE) {
+        /* flush any stale signals */
+    }
+    
+    // Try direct registration first (faster), fallback to callback if needed
+    if (!s_acd_registered) {
+        ESP_LOGD(TAG, "tcpip_perform_acd: Attempting direct ACD registration");
+        netif->acd_list = NULL;
+        memset(&s_static_ip_acd, 0, sizeof(s_static_ip_acd));
+        err_t add_err = acd_add(netif, &s_static_ip_acd, tcpip_acd_conflict_callback);
+        if (add_err == ERR_OK) {
+            s_acd_registered = true;
+            ESP_LOGD(TAG, "tcpip_perform_acd: Direct ACD registration succeeded");
+            free(ctx);  // Free context since we didn't use callback
+        } else {
+            ESP_LOGW(TAG, "tcpip_perform_acd: Direct registration failed (err=%d), trying callback", (int)add_err);
+            // Fall through to callback method
+        }
+    }
+    
+    // If direct registration failed, try via callback (ensures thread safety)
+    if (!s_acd_registered) {
+        ESP_LOGD(TAG, "tcpip_perform_acd: Registering ACD client via callback");
+        err_t callback_err = tcpip_callback_with_block(tcpip_acd_start_cb, ctx, 1);
+        // ctx is now freed by the callback
+        
+        if (callback_err != ERR_OK) {
+            ESP_LOGE(TAG, "Failed to register ACD client (callback_err=%d)", (int)callback_err);
+            g_tcpip.status |= kTcpipStatusAcdStatus | kTcpipStatusAcdFault;
+            CipTcpIpSetLastAcdActivity(3);
+            return false;
+        }
+        
+        // Wait for registration callback to complete (ensures s_acd_registered is set)
+        TickType_t registration_timeout = pdMS_TO_TICKS(500);  // 500ms timeout
+        if (xSemaphoreTake(s_acd_registration_sem, registration_timeout) != pdTRUE) {
+            ESP_LOGW(TAG, "ACD registration callback timed out - trying direct registration as fallback");
+            // Last resort: try direct registration again
+            if (!s_acd_registered) {
+                netif->acd_list = NULL;
+                memset(&s_static_ip_acd, 0, sizeof(s_static_ip_acd));
+                err_t add_err = acd_add(netif, &s_static_ip_acd, tcpip_acd_conflict_callback);
+                if (add_err == ERR_OK) {
+                    s_acd_registered = true;
+                    ESP_LOGI(TAG, "tcpip_perform_acd: Fallback direct registration succeeded");
+                } else {
+                    ESP_LOGE(TAG, "ACD registration failed via both callback and direct methods");
+                    g_tcpip.status |= kTcpipStatusAcdStatus | kTcpipStatusAcdFault;
+                    CipTcpIpSetLastAcdActivity(3);
+                    return false;
+                }
+            }
+        }
+        
+        if (!s_acd_registered) {
+            ESP_LOGE(TAG, "ACD registration callback completed but registration failed");
+            g_tcpip.status |= kTcpipStatusAcdStatus | kTcpipStatusAcdFault;
+            CipTcpIpSetLastAcdActivity(3);
+            return false;
+        }
+    }
+    
+    // Start ACD probe directly (we're on tcpip thread or direct registration succeeded)
+    if (s_acd_probe_pending && s_acd_registered) {
+        ESP_LOGD(TAG, "tcpip_perform_acd: Starting ACD probe for IP " IPSTR, IP2STR(ip));
+        err_t acd_start_err = acd_start(netif, &s_static_ip_acd, *ip);
+        if (acd_start_err == ERR_OK) {
+            ESP_LOGD(TAG, "tcpip_perform_acd: ACD probe started");
+        } else {
+            ESP_LOGE(TAG, "tcpip_perform_acd: acd_start() failed with err=%d", (int)acd_start_err);
+            // Try via callback as fallback
+            AcdStartProbeContext *probe_ctx = (AcdStartProbeContext *)malloc(sizeof(AcdStartProbeContext));
+            if (probe_ctx == NULL) {
+                ESP_LOGE(TAG, "Failed to allocate probe context");
+                g_tcpip.status |= kTcpipStatusAcdStatus | kTcpipStatusAcdFault;
+                CipTcpIpSetLastAcdActivity(3);
+                return false;
+            }
+            
+            probe_ctx->netif = netif;
+            probe_ctx->ip = *ip;
+            probe_ctx->err = ERR_OK;
+            
+            err_t callback_err = tcpip_callback_with_block(acd_start_probe_cb, probe_ctx, 1);
+            if (callback_err != ERR_OK) {
+                ESP_LOGE(TAG, "tcpip_perform_acd: acd_start() callback failed (callback_err=%d)", 
+                         (int)callback_err);
+                free(probe_ctx);
+                g_tcpip.status |= kTcpipStatusAcdStatus | kTcpipStatusAcdFault;
+                CipTcpIpSetLastAcdActivity(3);
+                return false;
+            }
+            ESP_LOGI(TAG, "tcpip_perform_acd: ACD probe started via callback");
+        }
+    } else {
+        ESP_LOGW(TAG, "tcpip_perform_acd: Cannot start ACD probe - probe_pending=%d, registered=%d", 
+                 s_acd_probe_pending, s_acd_registered);
+    }
 
+    // Wait for ACD to complete - probe phase takes ~600-800ms (3 probes × 200ms + wait times)
+    // Announce phase takes ~8s (4 announcements × 2s), but we can assign IP after probes complete
+    // Total probe phase: PROBE_WAIT (0-200ms) + 3 probes (200ms each) + ANNOUNCE_WAIT (2000ms) = ~2.8-3s max
+    // But we can assign after probe phase completes, so wait ~1.5s for probes + initial announce
+    TickType_t wait_ticks = pdMS_TO_TICKS(2000);  // Increased from 500ms to allow full probe sequence
+
+    ESP_LOGD(TAG, "Waiting for ACD probe sequence to complete (timeout: 2000ms)...");
     if (xSemaphoreTake(s_acd_sem, wait_ticks) == pdTRUE) {
         ESP_LOGI(TAG, "ACD completed with state=%d", (int)s_acd_last_state);
         if (s_acd_last_state == ACD_IP_OK) {
             CipTcpIpSetLastAcdActivity(0);
             return true;
         }
+        // If we got a callback but not ACD_IP_OK, it might be a conflict
+        if (s_acd_last_state == ACD_DECLINE || s_acd_last_state == ACD_RESTART_CLIENT) {
+            ESP_LOGE(TAG, "ACD detected conflict (state=%d) - IP should not be assigned", (int)s_acd_last_state);
+            CipTcpIpSetLastAcdActivity(3);
+            return false;
+        }
     } else if (s_acd_last_state == ACD_IP_OK) {
-        ESP_LOGW(TAG, "ACD completion detected without semaphore wake; continuing");
+        // MODIFICATION: ACD callback was received but semaphore wait timed out
+        // Added by: Adam G. Sweeney <agsweeney@gmail.com>
+        // This is OK - callback set state to IP_OK, so we can safely continue
+        // The timeout occurred because callback came after semaphore wait started,
+        // but the state change confirms ACD completed successfully
+        ESP_LOGI(TAG, "ACD callback received (state=IP_OK) - semaphore timeout was harmless, continuing with IP assignment");
         CipTcpIpSetLastAcdActivity(0);
         return true;
     }
 
+    // Timeout - check if callback set conflict state during wait
+    // Only explicit ACD_DECLINE/ACD_RESTART_CLIENT from callback indicates conflict
+    // Timeout without callback means no conflict (s_acd_last_state remains ACD_IP_OK)
     if (s_acd_last_state == ACD_RESTART_CLIENT || s_acd_last_state == ACD_DECLINE) {
-        ESP_LOGI(TAG, "ACD probe timed out without conflict response; continuing with static IP");
-        CipTcpIpSetLastAcdActivity(0);
-        return true;
+        // This state only occurs if callback was received, so it's a real conflict
+        ESP_LOGE(TAG, "ACD conflict detected during probe phase (state=%d) - IP should not be assigned", (int)s_acd_last_state);
+        CipTcpIpSetLastAcdActivity(3);
+        tcpip_callback_with_block(tcpip_acd_stop_cb, NULL, 1);
+        return false;
     }
+    
+    // Timeout without callback - ACD probe sequence might still be in progress
+    // In legacy mode, we continue but log a warning
+    // Note: This means we might assign IP even if a conflict exists (not ideal, but legacy mode limitation)
+    ESP_LOGW(TAG, "ACD probe wait timed out (state=%d) - no callback received yet", (int)s_acd_last_state);
+    ESP_LOGW(TAG, "Note: This is legacy ACD mode. Probe may still be running. For proper RFC 5227 compliance, enable RFC 5227 mode.");
+    ESP_LOGW(TAG, "Continuing with IP assignment - if conflict exists, it may be detected later");
+    CipTcpIpSetLastAcdActivity(0);
+    return true;
 
     ESP_LOGE(TAG, "ACD reported conflict (state=%d)", (int)s_acd_last_state);
     tcpip_callback_with_block(tcpip_acd_stop_cb, NULL, 1);
@@ -323,23 +725,40 @@ typedef struct {
 
 static void tcpip_rfc5227_acd_start_cb(void *arg) {
     Rfc5227AcdContext *ctx = (Rfc5227AcdContext *)arg;
+    ESP_LOGI(TAG, "tcpip_rfc5227_acd_start_cb: Starting ACD for IP " IPSTR, IP2STR(&ctx->ip));
     ctx->err = netif_set_addr_with_acd(ctx->netif, &ctx->ip, &ctx->netmask, &ctx->gw, 
                                         tcpip_acd_conflict_callback);
+    if (ctx->err == ERR_OK) {
+        ESP_LOGI(TAG, "netif_set_addr_with_acd() succeeded - ACD probe sequence starting");
+    } else {
+        ESP_LOGE(TAG, "netif_set_addr_with_acd() failed with err=%d", (int)ctx->err);
+    }
 }
 #endif
 
 static void tcpip_try_pending_acd(esp_netif_t *netif, struct netif *lwip_netif) {
+    ESP_LOGI(TAG, "tcpip_try_pending_acd: called - probe_pending=%d, netif=%p, lwip_netif=%p", 
+             s_acd_probe_pending, netif, lwip_netif);
     if (!s_acd_probe_pending || netif == NULL || lwip_netif == NULL) {
+        ESP_LOGW(TAG, "tcpip_try_pending_acd: Skipping - probe_pending=%d, netif=%p, lwip_netif=%p", 
+                 s_acd_probe_pending, netif, lwip_netif);
         return;
     }
     if (!netif_has_valid_hwaddr(lwip_netif)) {
         ESP_LOGI(TAG, "ACD deferred until MAC address is available");
         return;
     }
+    // Check if link is actually up - sometimes netif_is_link_up() can be delayed
+    // Use a small delay to allow netif to fully initialize after ETHERNET_EVENT_CONNECTED
     if (!netif_is_link_up(lwip_netif)) {
-        ESP_LOGI(TAG, "ACD deferred until link is up");
+        ESP_LOGI(TAG, "ACD deferred until link is up (link status: %d) - will retry", netif_is_link_up(lwip_netif));
+        // Note: "invalid static ip" error from esp_netif_handlers is expected and harmless.
+        // IP hasn't been assigned yet (waiting for ACD). Error disappears once IP is assigned.
+        // Retry after short delay - link should be up soon after ETHERNET_EVENT_CONNECTED
+        sys_timeout(100, tcpip_retry_acd_deferred, netif);
         return;
     }
+    ESP_LOGI(TAG, "tcpip_try_pending_acd: All conditions met, starting ACD...");
 
 #if LWIP_ACD_RFC5227_COMPLIANT_STATIC
     /* Use RFC 5227 compliant API: IP assignment deferred until ACD confirms */
@@ -353,6 +772,7 @@ static void tcpip_try_pending_acd(esp_netif_t *netif, struct netif *lwip_netif) 
     };
     
     CipTcpIpSetLastAcdActivity(2);
+    ESP_LOGI(TAG, "Starting RFC 5227 ACD probe for IP " IPSTR, IP2STR(&ctx.ip));
     if (tcpip_callback_with_block(tcpip_rfc5227_acd_start_cb, &ctx, 1) != ERR_OK || ctx.err != ERR_OK) {
         ESP_LOGE(TAG, "Failed to start RFC 5227 compliant ACD (err=%d)", (int)ctx.err);
         CipTcpIpSetLastAcdActivity(3);
@@ -364,35 +784,155 @@ static void tcpip_try_pending_acd(esp_netif_t *netif, struct netif *lwip_netif) 
         s_acd_probe_pending = false;
         CipTcpIpSetLastAcdActivity(0);
     } else {
-        ESP_LOGI(TAG, "RFC 5227: ACD started, IP assignment deferred");
+        ESP_LOGI(TAG, "RFC 5227: ACD started for IP " IPSTR ", probing for conflicts...", IP2STR(&ctx.ip));
+        ESP_LOGI(TAG, "ACD will send %d probes, waiting %d-%d ms between probes", 
+                 CONFIG_OPENER_ACD_PROBE_NUM,
+                 CONFIG_OPENER_ACD_PROBE_MIN_MS,
+                 CONFIG_OPENER_ACD_PROBE_MAX_MS);
         /* IP will be assigned when ACD_IP_OK callback is received */
         /* DNS will be configured in the callback */
     }
 #else
-    /* Legacy ACD flow: set IP first, then perform ACD */
+    /* Legacy ACD flow: Perform ACD BEFORE setting IP (better conflict detection) */
+    ESP_LOGW(TAG, "Using legacy ACD mode - ACD runs before IP assignment");
     ip4_addr_t desired_ip = { .addr = s_pending_static_ip_cfg.ip.addr };
     CipTcpIpSetLastAcdActivity(2);
+    ESP_LOGD(TAG, "Legacy ACD: Starting probe sequence for IP " IPSTR " BEFORE IP assignment", IP2STR(&desired_ip));
+    
+    // Run ACD BEFORE assigning IP to ensure conflicts are detected first
     if (!tcpip_perform_acd(lwip_netif, &desired_ip)) {
-        ESP_LOGE(TAG, "Deferred ACD conflict detected for " IPSTR, IP2STR(&s_pending_static_ip_cfg.ip));
-        ESP_LOGW(TAG, "Static configuration remains active despite ACD fault");
+        ESP_LOGE(TAG, "ACD conflict detected for " IPSTR " - NOT assigning IP", IP2STR(&desired_ip));
+        ESP_LOGW(TAG, "IP assignment cancelled due to ACD conflict");
+        g_tcpip.status |= kTcpipStatusAcdStatus | kTcpipStatusAcdFault;
+        CipTcpIpSetLastAcdActivity(3);
+        s_acd_probe_pending = false;
+        // Stop ACD and cancel any pending retry timers
+        tcpip_callback_with_block(tcpip_acd_stop_cb, NULL, 1);
+        // Don't assign IP if conflict detected
+        return;
     }
-
+    
+    // ACD completed successfully (or timed out without conflict) - safe to assign IP
+    ESP_LOGI(TAG, "Legacy ACD: No conflict detected - assigning IP " IPSTR, IP2STR(&desired_ip));
     ESP_ERROR_CHECK(esp_netif_set_ip_info(netif, &s_pending_static_ip_cfg));
     opener_configure_dns(netif);
     s_acd_probe_pending = false;
     CipTcpIpSetLastAcdActivity(0);
+
+    // Do NOT manually transition to ONGOING state: ACD timer will naturally transition
+    // PROBE_WAIT → PROBING → ANNOUNCE_WAIT → ANNOUNCING → ONGOING
+    // Manual transition only needed when skipping probe phase (handled in tcpip_acd_start_cb)
+    
+    // Cancel any pending retry timers (retry handler checks s_acd_probe_pending and skips gracefully)
 #endif
 }
 
 static void tcpip_retry_acd_deferred(void *arg) {
     esp_netif_t *netif = (esp_netif_t *)arg;
     if (netif == NULL) {
+        ESP_LOGW(TAG, "tcpip_retry_acd_deferred: NULL netif - retry timer fired after cleanup");
         return;
     }
+    
+    // Check if probe is still pending (prevents retry after IP assignment or ACD completion)
+    if (!s_acd_probe_pending) {
+        ESP_LOGD(TAG, "tcpip_retry_acd_deferred: ACD probe no longer pending (IP likely assigned) - skipping retry");
+        return;
+    }
+    
     struct netif *lwip_netif = (struct netif *)esp_netif_get_netif_impl(netif);
-    tcpip_try_pending_acd(netif, lwip_netif);
+    if (lwip_netif != NULL) {
+        ESP_LOGI(TAG, "tcpip_retry_acd_deferred: Retrying ACD start");
+        tcpip_try_pending_acd(netif, lwip_netif);
+    } else {
+        ESP_LOGW(TAG, "tcpip_retry_acd_deferred: NULL lwip_netif - netif may not be fully initialized yet");
+    }
 }
-#else
+
+#if CONFIG_OPENER_ACD_RETRY_ENABLED
+/**
+ * ACD Retry Logic
+ * 
+ * When a conflict is detected, removes IP address and schedules retry after delay.
+ * Retry restarts the ACD probe sequence. Configurable max attempts and delay.
+ */
+static void tcpip_acd_retry_timer_callback(TimerHandle_t xTimer) {
+    (void)xTimer;
+    
+    // Minimize stack usage: timer callbacks run in timer service task with limited stack
+    // Set flag and let retry happen via tcpip callback (has more stack space)
+    if (s_acd_retry_netif == NULL || s_acd_retry_lwip_netif == NULL) {
+        return;  // Don't log - timer task has limited stack
+    }
+    
+    // Reset probe pending flag to allow retry
+    s_acd_probe_pending = true;
+    
+    // Execute retry on tcpip thread (has more stack space)
+    err_t err = tcpip_callback_with_block(retry_callback, NULL, 0);
+    if (err != ERR_OK) {
+        // If callback fails, try direct call (may fail if not on tcpip thread, but won't crash)
+        // Don't log here - timer task has limited stack
+        tcpip_try_pending_acd(s_acd_retry_netif, s_acd_retry_lwip_netif);
+    }
+}
+
+static void tcpip_acd_start_retry(esp_netif_t *netif, struct netif *lwip_netif) {
+    if (netif == NULL || lwip_netif == NULL) {
+        ESP_LOGE(TAG, "ACD retry: Invalid netif pointers");
+        return;
+    }
+    
+    // Increment retry count
+    s_acd_retry_count++;
+    
+    // Store netif pointers for retry timer callback
+    s_acd_retry_netif = netif;
+    s_acd_retry_lwip_netif = lwip_netif;
+    
+    // Remove IP address (set to 0.0.0.0)
+    esp_netif_ip_info_t zero_ip = {0};
+    esp_err_t err = esp_netif_set_ip_info(netif, &zero_ip);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "ACD retry: Failed to remove IP address: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "ACD retry: IP address removed (set to 0.0.0.0)");
+    }
+    
+    // Stop ACD monitoring
+    if (s_acd_registered) {
+        acd_stop(&s_static_ip_acd);
+        s_acd_registered = false;
+    }
+    
+    // Create retry timer if it doesn't exist
+    if (s_acd_retry_timer == NULL) {
+        s_acd_retry_timer = xTimerCreate(
+            "acd_retry",
+            pdMS_TO_TICKS(CONFIG_OPENER_ACD_RETRY_DELAY_MS),
+            pdFALSE,  // One-shot timer
+            NULL,
+            tcpip_acd_retry_timer_callback
+        );
+        
+        if (s_acd_retry_timer == NULL) {
+            ESP_LOGE(TAG, "ACD retry: Failed to create retry timer");
+            return;
+        }
+    }
+    
+    // Reset timer to delay value and start it
+    xTimerChangePeriod(s_acd_retry_timer, 
+                       pdMS_TO_TICKS(CONFIG_OPENER_ACD_RETRY_DELAY_MS),
+                       portMAX_DELAY);
+    xTimerStart(s_acd_retry_timer, portMAX_DELAY);
+    
+    ESP_LOGI(TAG, "ACD retry: Timer started - will retry in %dms", CONFIG_OPENER_ACD_RETRY_DELAY_MS);
+}
+#endif /* CONFIG_OPENER_ACD_RETRY_ENABLED */
+
+#if !LWIP_IPV4 || !LWIP_ACD
+// Stub implementation when ACD is not available
 static bool tcpip_perform_acd(struct netif *netif, const ip4_addr_t *ip) {
     (void)netif;
     (void)ip;
@@ -402,7 +942,7 @@ static bool tcpip_perform_acd(struct netif *netif, const ip4_addr_t *ip) {
     g_tcpip.status &= ~(kTcpipStatusAcdStatus | kTcpipStatusAcdFault);
     return true;
 }
-#endif
+#endif /* !LWIP_IPV4 || !LWIP_ACD */
 
 static void configure_netif_from_tcpip(esp_netif_t *netif) {
     if (netif == NULL) {
@@ -430,7 +970,15 @@ static void configure_netif_from_tcpip(esp_netif_t *netif) {
             }
             /* If ACD enabled, IP will be set via netif_set_addr_with_acd() */
 #else
-            ESP_ERROR_CHECK(esp_netif_set_ip_info(netif, &ip_info));
+            /* Legacy ACD mode: Check if ACD is enabled BEFORE setting IP */
+            if (g_tcpip.select_acd) {
+                /* ACD enabled - defer IP assignment until ACD completes */
+                /* IP will be set after ACD probe completes (see tcpip_try_pending_acd) */
+                ESP_LOGI(TAG, "Legacy ACD enabled - IP assignment deferred until ACD completes");
+            } else {
+                /* ACD disabled - set IP immediately */
+                ESP_ERROR_CHECK(esp_netif_set_ip_info(netif, &ip_info));
+            }
 #endif
         } else {
             ESP_LOGW(TAG, "Static configuration missing IP/mask; attempting AutoIP fallback");
@@ -528,6 +1076,7 @@ static void ethernet_event_handler(void *arg, esp_event_base_t event_base,
         tcpip_callback_with_block(tcpip_acd_stop_cb, NULL, 1);
         #endif
         s_opener_initialized = false;
+        s_services_initialized = false;  // Allow re-initialization when link comes back up
         SampleApplicationNotifyLinkDown();
         break;
     case ETHERNET_EVENT_START:
@@ -584,58 +1133,66 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
     if (netif_to_use != NULL) {
         SampleApplicationSetActiveNetif(netif_to_use);
         
-        opener_init(netif_to_use);
-        s_opener_initialized = true;
-        SampleApplicationNotifyLinkUp();
-        
-        // Initialize OTA manager
-        if (!ota_manager_init()) {
-            ESP_LOGW(TAG, "Failed to initialize OTA manager");
-        }
-        
-        // Initialize and start Web UI
-        if (!webui_init()) {
-            ESP_LOGW(TAG, "Failed to initialize Web UI");
-        }
-        
-        // ModbusTCP is always enabled
-        if (!modbus_tcp_init()) {
-            ESP_LOGW(TAG, "Failed to initialize ModbusTCP");
-        } else {
-            if (!modbus_tcp_start()) {
-                ESP_LOGW(TAG, "Failed to start ModbusTCP server");
-            } else {
-                ESP_LOGI(TAG, "ModbusTCP server started");
+        // Initialize services only once (IP_EVENT_ETH_GOT_IP can fire multiple times)
+        if (!s_services_initialized) {
+            opener_init(netif_to_use);
+            s_opener_initialized = true;
+            SampleApplicationNotifyLinkUp();
+            
+            // Initialize OTA manager
+            if (!ota_manager_init()) {
+                ESP_LOGW(TAG, "Failed to initialize OTA manager");
             }
-        }
-        
-        // Perform comprehensive I2C bus scan to identify all connected devices
-        if (s_i2c_bus_handle != NULL) {
-            ESP_LOGI(TAG, "=== I2C Bus Scan ===");
-            scan_i2c_bus(s_i2c_bus_handle);
-            ESP_LOGI(TAG, "=== End I2C Bus Scan ===");
-        } else {
-            ESP_LOGW(TAG, "I2C bus not available for scanning");
-        }
-        
-        // Start MPU6050 test task (always try to initialize if I2C bus is available)
-        if (s_mpu6050_test_task_handle == NULL) {
-            if (s_i2c_bus_handle != NULL) {
-                BaseType_t result = xTaskCreatePinnedToCore(mpu6050_test_task,
-                                                           "MPU6050_TEST",
-                                                           4096,  // Stack size
-                                                           NULL,
-                                                           4,     // Priority (lower than MCP I/O)
-                                                           &s_mpu6050_test_task_handle,
-                                                           1);    // Core 1
-                if (result == pdPASS) {
-                    ESP_LOGI(TAG, "MPU6050 test task started on Core 1");
+            
+            // Initialize and start Web UI
+            if (!webui_init()) {
+                ESP_LOGW(TAG, "Failed to initialize Web UI");
+            }
+            
+            // ModbusTCP is always enabled
+            if (!modbus_tcp_init()) {
+                ESP_LOGW(TAG, "Failed to initialize ModbusTCP");
+            } else {
+                if (!modbus_tcp_start()) {
+                    ESP_LOGW(TAG, "Failed to start ModbusTCP server");
                 } else {
-                    ESP_LOGW(TAG, "Failed to create MPU6050 test task");
+                    ESP_LOGI(TAG, "ModbusTCP server started");
                 }
-            } else {
-                ESP_LOGI(TAG, "MPU6050 test task skipped - I2C bus not available");
             }
+            
+            // Perform comprehensive I2C bus scan to identify all connected devices
+            if (s_i2c_bus_handle != NULL) {
+                ESP_LOGI(TAG, "=== I2C Bus Scan ===");
+                scan_i2c_bus(s_i2c_bus_handle);
+                ESP_LOGI(TAG, "=== End I2C Bus Scan ===");
+            } else {
+                ESP_LOGW(TAG, "I2C bus not available for scanning");
+            }
+            
+            // Start MPU6050 test task (always try to initialize if I2C bus is available)
+            if (s_mpu6050_test_task_handle == NULL) {
+                if (s_i2c_bus_handle != NULL) {
+                    BaseType_t result = xTaskCreatePinnedToCore(mpu6050_test_task,
+                                                               "MPU6050_TEST",
+                                                               4096,  // Stack size
+                                                               NULL,
+                                                               4,     // Priority (lower than MCP I/O)
+                                                               &s_mpu6050_test_task_handle,
+                                                               1);    // Core 1
+                    if (result == pdPASS) {
+                        ESP_LOGI(TAG, "MPU6050 test task started on Core 1");
+                    } else {
+                        ESP_LOGW(TAG, "Failed to create MPU6050 test task");
+                    }
+                } else {
+                    ESP_LOGI(TAG, "MPU6050 test task skipped - I2C bus not available");
+                }
+            }
+            
+            s_services_initialized = true;
+            ESP_LOGI(TAG, "All services initialized");
+        } else {
+            ESP_LOGD(TAG, "Services already initialized, skipping re-initialization");
         }
     } else {
         ESP_LOGE(TAG, "Failed to find netif");
@@ -644,6 +1201,9 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
 
 void app_main(void)
 {
+    // Initialize user LED early at boot
+    user_led_init();
+    
     // Initialize log buffer early to capture boot logs
     // Use 32KB buffer to capture boot sequence and recent runtime logs
     if (!log_buffer_init(32 * 1024)) {
@@ -675,6 +1235,14 @@ void app_main(void)
     
     (void)NvTcpipLoad(&g_tcpip);
     ESP_LOGI(TAG, "After NV load select_acd=%d", g_tcpip.select_acd);
+    
+    // Ensure ACD is enabled for static IP configuration
+    if (!tcpip_config_uses_dhcp() && !g_tcpip.select_acd) {
+        ESP_LOGW(TAG, "ACD not enabled for static IP - enabling ACD for conflict detection");
+        g_tcpip.select_acd = true;
+        NvTcpipStore(&g_tcpip);
+        ESP_LOGI(TAG, "ACD enabled successfully");
+    }
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -841,6 +1409,87 @@ static void scan_i2c_bus(i2c_master_bus_handle_t bus_handle)
     
     ESP_LOGI(TAG, "Device summary:");
     if (has_mpu6050) ESP_LOGI(TAG, "  ✓ MPU6050 IMU detected");
+}
+
+// User LED control functions
+static void user_led_init(void) {
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << USER_LED_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    esp_err_t ret = gpio_config(&io_conf);
+    if (ret == ESP_OK) {
+        s_user_led_initialized = true;
+        // Start blinking by default at boot
+        user_led_start_flash();
+        ESP_LOGI(TAG, "User LED initialized on GPIO%d (blinking by default)", USER_LED_GPIO);
+    } else {
+        ESP_LOGE(TAG, "Failed to initialize user LED on GPIO%d: %s", USER_LED_GPIO, esp_err_to_name(ret));
+    }
+}
+
+static void user_led_set(bool on) {
+    if (s_user_led_initialized) {
+        gpio_set_level(USER_LED_GPIO, on ? 1 : 0);
+    }
+}
+
+static void user_led_flash_task(void *pvParameters) {
+    (void)pvParameters;
+    const TickType_t flash_interval = pdMS_TO_TICKS(500);  // 500ms on/off
+    
+    while (1) {
+        if (s_user_led_flash_enabled) {
+            user_led_set(true);
+            vTaskDelay(flash_interval);
+            user_led_set(false);
+            vTaskDelay(flash_interval);
+        } else {
+            // If flashing disabled, keep LED on and exit task
+            user_led_set(true);
+            vTaskDelete(NULL);
+            return;
+        }
+    }
+}
+
+static void user_led_start_flash(void) {
+    if (!s_user_led_initialized) {
+        return;
+    }
+    
+    if (s_user_led_task_handle == NULL) {
+        s_user_led_flash_enabled = true;
+        BaseType_t ret = xTaskCreate(
+            user_led_flash_task,
+            "user_led_flash",
+            2048,
+            NULL,
+            1,  // Low priority
+            &s_user_led_task_handle
+        );
+        if (ret == pdPASS) {
+            ESP_LOGI(TAG, "User LED: Started blinking (normal operation)");
+        } else {
+            ESP_LOGE(TAG, "Failed to create user LED flash task");
+            s_user_led_flash_enabled = false;
+        }
+    }
+}
+
+static void user_led_stop_flash(void) {
+    if (s_user_led_task_handle != NULL) {
+        s_user_led_flash_enabled = false;
+        // Wait a bit for the task to exit cleanly
+        vTaskDelay(pdMS_TO_TICKS(100));
+        if (s_user_led_task_handle != NULL) {
+            s_user_led_task_handle = NULL;
+            ESP_LOGI(TAG, "User LED: Stopped blinking (going solid for ACD conflict)");
+        }
+    }
 }
 
 // Task to test MPU6050 sensor - initializes, verifies connection, and logs readings

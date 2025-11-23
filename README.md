@@ -253,7 +253,18 @@ This project uses custom components and modified dependencies. When contributing
 
 ## License
 
-This project uses the OpENer EtherNet/IP stack, which is licensed under an adapted BSD-style license. See the OpENer license file for details.
+### Project Code
+This project's own code (main application, Web UI, Modbus TCP, MPU6050 driver, OTA manager, system configuration, etc.) is licensed under the MIT License. See individual source files for copyright attribution.
+
+### OpENer EtherNet/IP Stack
+This project uses the OpENer EtherNet/IP stack, which is licensed under an adapted BSD-style license. The OpENer license file is included in `components/opener/LICENSE.txt` and must be preserved in all distributions.
+
+All OpENer source files retain their original copyright notices:
+- Copyright (c) 2009, Rockwell Automation, Inc.
+- Modifications by Adam G. Sweeney <agsweeney@gmail.com> are clearly marked
+
+### lwIP Network Stack
+This project includes a modified version of lwIP from ESP-IDF v5.5.1. The lwIP modifications are clearly marked with attribution. Original lwIP license terms apply.
 
 **Note**: EtherNet/IP™ is a trademark of ODVA, Inc.
 

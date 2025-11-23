@@ -73,7 +73,8 @@
 #include "lwip/etharp.h"
 #include "sdkconfig.h"
 
-#define ACD_DIAG(fmt, ...) LWIP_PLATFORM_DIAG(("ACD: " fmt "\n", ##__VA_ARGS__))
+// Disable ACD diagnostic logging to reduce log noise (only conflicts logged via LWIP_DEBUGF)
+#define ACD_DIAG(fmt, ...) ((void)0)
 
 static void
 acd_log_mac(const char *tag, const struct eth_addr *mac, const ip4_addr_t *sipaddr, const ip4_addr_t *dipaddr)
@@ -325,11 +326,14 @@ acd_tmr(void)
           if (acd->ttw == 0) {
             acd->state = ACD_STATE_PROBING;
             etharp_acd_probe(netif, &acd->ipaddr);
+            /* Probe logging disabled to reduce log noise (only logs conflicts now) */
+            /*
             {
               struct eth_addr src_mac;
               SMEMCPY(src_mac.addr, netif->hwaddr, ETH_HWADDR_LEN);
               acd_log_mac("sent probe", &src_mac, &acd->ipaddr, NULL);
             }
+            */
             LWIP_DEBUGF(ACD_DEBUG | LWIP_DBG_TRACE,
                         ("acd_tmr() PROBING Sent Probe\n"));
             acd->sent_num++;
@@ -364,11 +368,14 @@ acd_tmr(void)
             }
 
             etharp_acd_announce(netif, &acd->ipaddr);
+            /* Announce logging disabled to reduce log noise (only logs conflicts now) */
+            /*
             {
               struct eth_addr src_mac;
               SMEMCPY(src_mac.addr, netif->hwaddr, ETH_HWADDR_LEN);
               acd_log_mac("sent announce", &src_mac, &acd->ipaddr, NULL);
             }
+            */
             LWIP_DEBUGF(ACD_DEBUG | LWIP_DBG_TRACE,
                         ("acd_tmr() ANNOUNCING Sent Announce\n"));
             acd->ttw = ACD_ANNOUNCE_INTERVAL_TICKS_VALUE;
@@ -461,7 +468,8 @@ acd_arp_reply(struct netif *netif, struct etharp_hdr *hdr)
   IPADDR_WORDALIGNED_COPY_TO_IP4_ADDR_T(&dipaddr, &hdr->dipaddr);
 
   LWIP_DEBUGF(ACD_DEBUG | LWIP_DBG_TRACE, ("acd_arp_reply()\n"));
-  acd_log_mac("received arp", &hdr->shwaddr, &sipaddr, &dipaddr);
+  /* Only log conflicts, not all ARP packets (too verbose for production) */
+  /* acd_log_mac("received arp", &hdr->shwaddr, &sipaddr, &dipaddr); */
 
   /* loop over the acd's*/
   ACD_FOREACH(acd, netif->acd_list) {

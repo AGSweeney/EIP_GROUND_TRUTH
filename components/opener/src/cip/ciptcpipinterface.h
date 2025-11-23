@@ -94,6 +94,13 @@ void CipTcpIpCalculateMulticastIp(CipTcpIpObject *const tcpip);
 EipUint16 GetEncapsulationInactivityTimeout(CipInstance *instance);
 
 void CipTcpIpSetLastAcdActivity(CipUsint activity);
+
+/* MODIFICATIONS BY: Adam G. Sweeney <agsweeney@gmail.com>
+ * The following functions were added to support EtherNet/IP TCP/IP Interface
+ * Object Attribute #11 "Last Conflict Detected" as required by the EtherNet/IP
+ * specification. These functions capture and store conflict data (MAC address
+ * and ARP frame) when ACD conflicts are detected.
+ */
 void CipTcpIpSetLastAcdMac(const uint8_t mac[6]);
 void CipTcpIpSetLastAcdRawData(const uint8_t *data, size_t length);
 CipBool CipTcpIpIsValidNetworkConfig(const CipTcpIpInterfaceConfiguration *if_cfg);

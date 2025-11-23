@@ -316,6 +316,13 @@ static bool IsIOConnectionActive(void) {
 
 
 static CipUsint dummy_data_field = 0; /**< dummy data fiel to provide non-null data pointers for attributes without data fields */
+
+/* MODIFICATION: Storage structure for EtherNet/IP TCP/IP Interface Object Attribute #11
+ * Added by: Adam G. Sweeney <agsweeney@gmail.com>
+ * This structure stores the last ACD conflict data (activity status, MAC address,
+ * and raw ARP frame) as required by EtherNet/IP specification for Attribute #11
+ * "Last Conflict Detected"
+ */
 static struct {
   CipUsint activity;
   CipUsint remote_mac[6];
@@ -328,16 +335,37 @@ static void TcpipSetLastConflictState(CipUsint activity) {
   memset(s_tcpip_last_conflict.raw_data, 0, sizeof(s_tcpip_last_conflict.raw_data));
 }
 
+/* MODIFICATIONS BY: Adam G. Sweeney <agsweeney@gmail.com>
+ *
+ * The following functions were added to support EtherNet/IP TCP/IP Interface
+ * Object Attribute #11 "Last Conflict Detected" as required by the EtherNet/IP
+ * specification. These functions capture and store conflict data (MAC address
+ * and ARP frame) when ACD conflicts are detected.
+ */
+
 void CipTcpIpSetLastAcdActivity(CipUsint activity) {
   TcpipSetLastConflictState(activity);
 }
 
+/** @brief Set the MAC address of the conflicting device
+ *  @param mac MAC address array (6 bytes)
+ *  Added by: Adam G. Sweeney <agsweeney@gmail.com>
+ *  This function is called from lwIP ACD when a conflict is detected
+ *  to store the conflicting device's MAC address for Attribute #11
+ */
 void CipTcpIpSetLastAcdMac(const uint8_t mac[6]) {
   if (NULL != mac) {
     memcpy(s_tcpip_last_conflict.remote_mac, mac, sizeof(s_tcpip_last_conflict.remote_mac));
   }
 }
 
+/** @brief Set the raw ARP frame data from the conflict
+ *  @param data Pointer to ARP frame data
+ *  @param length Length of ARP frame data (max 28 bytes)
+ *  Added by: Adam G. Sweeney <agsweeney@gmail.com>
+ *  This function is called from lwIP ACD when a conflict is detected
+ *  to store the raw ARP frame for Attribute #11 diagnostic purposes
+ */
 void CipTcpIpSetLastAcdRawData(const uint8_t *data, size_t length) {
   if (NULL == data) {
     memset(s_tcpip_last_conflict.raw_data, 0, sizeof(s_tcpip_last_conflict.raw_data));
@@ -401,6 +429,11 @@ void EncodeSafetyNetworkNumber(const void *const data,
   FillNextNMessageOctetsWithValueAndMoveToNextPosition(0, 6, outgoing_message);
 }
 
+/* MODIFICATION: Encode EtherNet/IP TCP/IP Interface Object Attribute #11
+ * Added by: Adam G. Sweeney <agsweeney@gmail.com>
+ * This function encodes the last ACD conflict data (activity status, MAC address,
+ * and raw ARP frame) for EtherNet/IP Attribute #11 "Last Conflict Detected"
+ */
 void EncodeCipLastConflictDetected(const void *const data,
                                    ENIPMessage *const outgoing_message) {
   (void)data;
@@ -766,6 +799,10 @@ EipStatus CipTcpIpInterfaceInit() {
                   DecodeTcpIpSelectAcd,
                   &g_tcpip.select_acd,
                   kGetableSingleAndAll | kSetable | kNvDataFunc);
+  /* MODIFICATION: Register Attribute #11 "Last Conflict Detected"
+   * Added by: Adam G. Sweeney <agsweeney@gmail.com>
+   * This attribute stores ACD conflict data as required by EtherNet/IP specification
+   */
   InsertAttribute(instance,
                   11,
                   kCipBool,
