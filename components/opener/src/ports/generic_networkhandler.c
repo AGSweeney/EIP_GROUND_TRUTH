@@ -470,6 +470,16 @@ void CheckAndHandleTcpListenerSocket(void) {
     } OPENER_TRACE_INFO(">>> network handler: accepting new TCP socket: %d \n",
                         new_socket);
 
+    /* Disable Nagle's algorithm for low latency EtherNet/IP explicit messaging */
+    int flag = 1;
+    if(setsockopt(new_socket, IPPROTO_TCP, TCP_NODELAY, (char *)&flag, sizeof(flag)) < 0) {
+      int error_code = GetSocketErrorNumber();
+      char *error_message = GetErrorMessage(error_code);
+      OPENER_TRACE_WARN("networkhandler: failed to set TCP_NODELAY on new TCP socket %d: %d - %s\n",
+                        new_socket, error_code, error_message);
+      FreeErrorMessage(error_message);
+    }
+
     SocketTimer *socket_timer = SocketTimerArrayGetEmptySocketTimer(
       g_timestamps,
       OPENER_NUMBER_OF_SUPPORTED_SESSIONS);

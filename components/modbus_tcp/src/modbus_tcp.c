@@ -69,6 +69,12 @@ static void modbus_tcp_server_task(void *pvParameters)
             if (new_socket >= 0) {
                 // New ModbusTCP connection
                 
+                // Disable Nagle's algorithm for low latency
+                int flag = 1;
+                if (setsockopt(new_socket, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
+                    ESP_LOGW(TAG, "Failed to set TCP_NODELAY on new connection: %s", strerror(errno));
+                }
+                
                 // Find empty slot
                 bool added = false;
                 for (int i = 0; i < MODBUS_TCP_MAX_CONNECTIONS; i++) {

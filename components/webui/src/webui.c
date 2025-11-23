@@ -4,6 +4,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "webui_api.h"
+#include "lwip/sockets.h"
 #include <string.h>
 
 // Forward declarations for HTML content functions
@@ -155,6 +156,11 @@ bool webui_init(void)
     config.max_req_hdr_len = 2048; // Increased to 2KB for larger multipart headers
 
     ESP_LOGI(TAG, "Starting HTTP server on port %d", config.server_port);
+    
+    // Note: TCP_NODELAY (Nagle's algorithm disabled) would improve Web API responsiveness
+    // but ESP-IDF httpd manages sockets internally and doesn't expose a socket callback.
+    // To enable TCP_NODELAY for HTTP server, use an lwIP hook or patch ESP-IDF httpd component.
+    // For now, TCP_NODELAY is enabled for Modbus TCP and EtherNet/IP (critical services).
     
     if (httpd_start(&server_handle, &config) == ESP_OK) {
         ESP_LOGI(TAG, "HTTP server started");
