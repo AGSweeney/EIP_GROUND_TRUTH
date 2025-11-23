@@ -182,7 +182,14 @@ This document provides a comprehensive record of all modifications made to the L
    - The application (`main/main.c`) does not manually stop/restart ACD - it relies on the natural state machine transition
    - This ensures the probe sequence completes correctly without interference
 
-**Rationale**: Implements RFC 5227 compliant behavior - IP assigned only after ACD confirms safety, removed on conflict. Adds active defense and EtherNet/IP integration. Uses natural state machine flow to avoid interfering with probe sequence.
+8. **Callback Tracking Fix** (in `main/main.c`):
+   - Added `s_acd_callback_received` flag to distinguish between actual callback events and timeout conditions
+   - Prevents false positive conflict detection when semaphore timeout occurs (probe sequence still running)
+   - Timeout returns `true` (no conflict, waiting for callback) vs `false` (actual conflict detected)
+   - IP assignment occurs in callback when `ACD_IP_OK` fires, ensuring probes complete before IP assignment
+   - Caller checks `s_acd_callback_received` before treating timeout as conflict
+
+**Rationale**: Implements RFC 5227 compliant behavior - IP assigned only after ACD confirms safety, removed on conflict. Adds active defense and EtherNet/IP integration. Uses natural state machine flow to avoid interfering with probe sequence. Prevents false positive conflict detection through callback tracking.
 
 ---
 

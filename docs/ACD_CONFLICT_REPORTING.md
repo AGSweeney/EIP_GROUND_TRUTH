@@ -149,7 +149,7 @@ The `ACD_IP_OK` callback fires **after** the announce phase completes (when tran
 
 When the device boots with a static IP address and another device is already using it:
 
-1. **Probe Phase**: Device sends 3 ARP probes from `0.0.0.0` asking "Who has IP X?"
+1. **Probe Phase**: Device sends 3 ARP probes from `0.0.0.0` asking "Who has IP X?" (**BEFORE IP assignment**)
 2. **Conflict Detected**: Another device responds to the probe
 3. **IP Assignment**: IP is **NOT assigned** (device never claims the address)
 4. **Conflict Data**: MAC address and ARP frame are captured and stored
@@ -160,6 +160,8 @@ When the device boots with a static IP address and another device is already usi
    - Each retry attempts to acquire the IP address again
 
 **Result**: Device does not assign the conflicting IP and retries periodically to acquire it.
+
+**Note**: The probe sequence (3 probes + 2-4 announcements) takes approximately 6-10 seconds to complete. The device uses a callback tracking mechanism (`s_acd_callback_received` flag) to distinguish between actual conflict callbacks and timeout conditions, preventing false positive conflict detection. IP assignment occurs when the `ACD_IP_OK` callback fires after the announce phase completes, ensuring the full probe sequence completes before IP assignment.
 
 ### Scenario 2: Ongoing Conflict (After IP Assigned)
 
@@ -314,6 +316,8 @@ with LogixDriver('172.16.82.100') as plc:
    - ACD callback handler (`tcpip_acd_conflict_callback`)
    - Updates activity status via `CipTcpIpSetLastAcdActivity()`
    - Controls user LED indication
+   - **Callback Tracking**: Uses `s_acd_callback_received` flag to distinguish between actual callback events and timeout conditions, preventing false positive conflict detection
+   - **Legacy Mode IP Assignment**: Assigns IP address in callback when `ACD_IP_OK` fires (after announce phase completes), ensuring probes complete before IP assignment
 
 3. **`components/opener/src/cip/ciptcpipinterface.c`**:
    - Storage structure (`s_tcpip_last_conflict`)
@@ -328,6 +332,15 @@ with LogixDriver('172.16.82.100') as plc:
 - ACD callbacks execute on the lwIP tcpip thread
 - Storage functions are called synchronously during conflict detection
 - No additional locking required (single-threaded execution context)
+
+### Callback Tracking and Timeout Handling
+
+The implementation uses a callback tracking mechanism to prevent false positive conflict detection:
+
+- **`s_acd_callback_received` flag**: Tracks whether the ACD callback was actually received (not just initialized value)
+- **Timeout vs Conflict**: When `tcpip_perform_acd()` times out (after 2000ms), it returns `true` to indicate "no conflict detected yet, waiting for callback". This is distinguished from returning `false` (which indicates an actual conflict callback was received).
+- **IP Assignment Timing**: In legacy mode, IP assignment occurs when the `ACD_IP_OK` callback fires (after announce phase completes), not on timeout. This ensures the full probe sequence (3 probes + 2-4 announcements, ~6-10 seconds) completes before IP assignment.
+- **False Positive Prevention**: The caller checks `s_acd_callback_received` before treating a timeout as a conflict, preventing premature IP assignment or false conflict detection.
 
 ## References
 
