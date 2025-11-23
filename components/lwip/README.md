@@ -20,7 +20,12 @@ Since this directory exists, ESP-IDF will use this version instead of the system
 
 ## Modified Files
 
-- `lwip/src/core/ipv4/acd.c` - Modified with disabled ACD diagnostic logging and RFC 5227 improvements
+- `lwip/src/core/ipv4/acd.c` - Modified with:
+  - Disabled ACD diagnostic logging (reduced log noise)
+  - RFC 5227 compliant improvements
+  - Active IP defense with periodic ARP probes
+  - EtherNet/IP conflict reporting integration
+  - Custom timing configuration via Kconfig
 
 ## Original Source
 

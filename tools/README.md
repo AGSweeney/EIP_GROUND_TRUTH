@@ -1,6 +1,10 @@
 # Testing Tools
 
-## ACD Conflict Simulator
+This directory contains various Python tools for testing and debugging the ESP32-P4 OpENer EtherNet/IP adapter.
+
+## Tools
+
+### ACD Conflict Simulator
 
 `test_acd_conflict.py` - Python script to simulate IP address conflicts for testing Address Conflict Detection (ACD).
 
@@ -78,4 +82,85 @@ When a conflict is detected, the ESP32 should:
 - Set the user LED to solid (instead of blinking)
 - Not assign the IP address (during probe phase)
 - Report conflict details via EtherNet/IP Attribute #11
+
+## ARP Conflict Sender
+
+`send_conflict_arp.py` - Simple script to send ARP announcements claiming a specific IP address.
+
+### Usage
+
+```bash
+python send_conflict_arp.py --ip 172.16.82.100 --interface eth0
+```
+
+## PDML to Markdown Converter
+
+`pdml_to_markdown.py` - Convert Wireshark PDML (Packet Details Markup Language) export files into concise, human-readable Markdown format.
+
+### Usage
+
+```bash
+python pdml_to_markdown.py input.pdml output.md
+```
+
+### Features
+
+- **Concise Format**: Shows packet metadata, description, and key fields only
+- **Human-Readable Descriptions**: Automatically describes what each packet is doing (ARP probes, TCP connections, etc.)
+- **Key Field Extraction**: Extracts source/destination IPs, MAC addresses, ports, and other important fields
+- **Protocol Detection**: Identifies EtherNet/IP, Modbus TCP, HTTP, DNS, and other protocols
+
+### Example Output
+
+```markdown
+## Packet #77
+**Time:** 14:08:43.123
+**Delta:** 0.346855000 seconds
+**Size:** 60 bytes
+**Protocols:** `eth:ethertype:arp`
+
+**Description:** **ARP Probe** from `0.0.0.0` asking "Who has 172.16.82.155?" | **Broadcast** frame from `30:ed:a0:e3:34:c1`
+
+**Key Fields:**
+- Source IP: `0.0.0.0`
+- Target IP: `172.16.82.155`
+- Source MAC: `30:ed:a0:e3:34:c1`
+- Destination MAC: `ff:ff:ff:ff:ff:ff`
+```
+
+This tool is useful for documenting network captures and analyzing ACD behavior.
+
+## ARP Timing Analyzer
+
+`analyze_arp_timing.py` - Analyze ARP timing patterns from Wireshark CSV exports.
+
+### Usage
+
+```bash
+python analyze_arp_timing.py input.csv
+```
+
+## Interface Lister
+
+`list_interfaces.py` - List available network interfaces for Scapy scripts.
+
+### Usage
+
+```bash
+python list_interfaces.py
+```
+
+## Requirements
+
+All tools require Python 3.x and the following packages (see `requirements.txt`):
+
+```bash
+pip install -r requirements.txt
+```
+
+**Note:** On Windows, you may need to install Npcap (WinPcap successor) for Scapy to work:
+- Download from: https://npcap.com/
+- Install Npcap (not Npcap SDK)
+
+On Linux, you may need to run with `sudo` for raw socket access.
 

@@ -131,36 +131,45 @@ def format_packet_concise(packet, packet_num):
     
     # Extract key fields for summary - prioritize IP addresses
     key_fields = []
+    seen_fields = set()  # Track what we've already added to avoid duplicates
     
     # ARP fields - get IPs from ARP first
     arp_proto = packet.find('.//proto[@name="arp"]')
     arp_src_ip = ''
     arp_dst_ip = ''
+    arp_src_mac = ''
     if arp_proto is not None:
         arp_src_ip = get_field_value(arp_proto, 'arp.src.proto_ipv4', '')
         arp_dst_ip = get_field_value(arp_proto, 'arp.dst.proto_ipv4', '')
-        src_mac = get_field_value(arp_proto, 'arp.src.hw_mac', '')
+        arp_src_mac = get_field_value(arp_proto, 'arp.src.hw_mac', '')
         if arp_src_ip:
             key_fields.append(f"Source IP: `{arp_src_ip}`")
+            seen_fields.add('src_ip')
         if arp_dst_ip:
             key_fields.append(f"Target IP: `{arp_dst_ip}`")
-        if src_mac:
-            key_fields.append(f"Source MAC: `{src_mac}`")
+            seen_fields.add('dst_ip')
+        if arp_src_mac:
+            key_fields.append(f"Source MAC: `{arp_src_mac}`")
+            seen_fields.add('arp_src_mac')
     
     # IP fields - use IP layer if ARP didn't have IPs
     ip_proto = packet.find('.//proto[@name="ip"]')
     if ip_proto is not None:
         ip_src = get_field_value(ip_proto, 'ip.src', '')
         ip_dst = get_field_value(ip_proto, 'ip.dst', '')
-        # Only add if not already added from ARP
-        if ip_src and ip_src != arp_src_ip:
+        # Always add IPs from IP layer if available (they're more accurate for IP packets)
+        if ip_src and 'src_ip' not in seen_fields:
             key_fields.append(f"Source IP: `{ip_src}`")
-        elif ip_src and not arp_src_ip:
-            key_fields.append(f"Source IP: `{ip_src}`")
-        if ip_dst and ip_dst != arp_dst_ip:
+            seen_fields.add('src_ip')
+        elif ip_src and ip_src != arp_src_ip:
+            # Replace ARP IP with IP layer IP (more accurate)
+            key_fields = [f.replace(f"Source IP: `{arp_src_ip}`", f"Source IP: `{ip_src}`") for f in key_fields]
+        if ip_dst and 'dst_ip' not in seen_fields:
             key_fields.append(f"Destination IP: `{ip_dst}`")
-        elif ip_dst and not arp_dst_ip:
-            key_fields.append(f"Destination IP: `{ip_dst}`")
+            seen_fields.add('dst_ip')
+        elif ip_dst and ip_dst != arp_dst_ip:
+            # Replace ARP IP with IP layer IP (more accurate)
+            key_fields = [f.replace(f"Target IP: `{arp_dst_ip}`", f"Destination IP: `{ip_dst}`") for f in key_fields]
     
     # TCP fields
     tcp_proto = packet.find('.//proto[@name="tcp"]')
@@ -185,15 +194,15 @@ def format_packet_concise(packet, packet_num):
         if dst_port:
             key_fields.append(f"Destination Port: `{dst_port}`")
     
-    # Ethernet fields
+    # Ethernet fields - only add if not already added from ARP
     eth_proto = packet.find('.//proto[@name="eth"]')
     if eth_proto is not None:
-        src_mac = get_field_value(eth_proto, 'eth.src', '')
-        dst_mac = get_field_value(eth_proto, 'eth.dst', '')
-        if src_mac:
-            key_fields.append(f"Source MAC: `{src_mac}`")
-        if dst_mac:
-            key_fields.append(f"Destination MAC: `{dst_mac}`")
+        eth_src_mac = get_field_value(eth_proto, 'eth.src', '')
+        eth_dst_mac = get_field_value(eth_proto, 'eth.dst', '')
+        if eth_src_mac and 'arp_src_mac' not in seen_fields and eth_src_mac != arp_src_mac:
+            key_fields.append(f"Source MAC: `{eth_src_mac}`")
+        if eth_dst_mac:
+            key_fields.append(f"Destination MAC: `{eth_dst_mac}`")
     
     # Build markdown
     result = [f"## Packet #{packet_number}"]

@@ -18,7 +18,6 @@
 - Source IP: `0.0.0.0`
 - Target IP: `172.16.82.155`
 - Source MAC: `30:ed:a0:e3:34:c1`
-- Source MAC: `30:ed:a0:e3:34:c1`
 - Destination MAC: `ff:ff:ff:ff:ff:ff`
 
 ---
@@ -34,7 +33,6 @@
 **Key Fields:**
 - Source IP: `0.0.0.0`
 - Target IP: `172.16.82.155`
-- Source MAC: `30:ed:a0:e3:34:c1`
 - Source MAC: `30:ed:a0:e3:34:c1`
 - Destination MAC: `ff:ff:ff:ff:ff:ff`
 
@@ -52,7 +50,6 @@
 - Source IP: `0.0.0.0`
 - Target IP: `172.16.82.155`
 - Source MAC: `30:ed:a0:e3:34:c1`
-- Source MAC: `30:ed:a0:e3:34:c1`
 - Destination MAC: `ff:ff:ff:ff:ff:ff`
 
 ---
@@ -68,7 +65,6 @@
 **Key Fields:**
 - Source IP: `0.0.0.0`
 - Target IP: `172.16.82.155`
-- Source MAC: `30:ed:a0:e3:34:c1`
 - Source MAC: `30:ed:a0:e3:34:c1`
 - Destination MAC: `ff:ff:ff:ff:ff:ff`
 
@@ -86,7 +82,6 @@
 - Source IP: `0.0.0.0`
 - Target IP: `172.16.82.155`
 - Source MAC: `30:ed:a0:e3:34:c1`
-- Source MAC: `30:ed:a0:e3:34:c1`
 - Destination MAC: `ff:ff:ff:ff:ff:ff`
 
 ---
@@ -102,7 +97,6 @@
 **Key Fields:**
 - Source IP: `0.0.0.0`
 - Target IP: `172.16.82.155`
-- Source MAC: `30:ed:a0:e3:34:c1`
 - Source MAC: `30:ed:a0:e3:34:c1`
 - Destination MAC: `ff:ff:ff:ff:ff:ff`
 
@@ -120,7 +114,6 @@
 - Source IP: `172.16.82.155`
 - Target IP: `172.16.82.155`
 - Source MAC: `30:ed:a0:e3:34:c1`
-- Source MAC: `30:ed:a0:e3:34:c1`
 - Destination MAC: `ff:ff:ff:ff:ff:ff`
 
 ---
@@ -136,7 +129,6 @@
 **Key Fields:**
 - Source IP: `172.16.82.155`
 - Target IP: `172.16.82.155`
-- Source MAC: `30:ed:a0:e3:34:c1`
 - Source MAC: `30:ed:a0:e3:34:c1`
 - Destination MAC: `ff:ff:ff:ff:ff:ff`
 
@@ -154,7 +146,6 @@
 - Source IP: `172.16.82.155`
 - Target IP: `172.16.82.155`
 - Source MAC: `30:ed:a0:e3:34:c1`
-- Source MAC: `30:ed:a0:e3:34:c1`
 - Destination MAC: `ff:ff:ff:ff:ff:ff`
 
 ---
@@ -170,7 +161,6 @@
 **Key Fields:**
 - Source IP: `172.16.82.155`
 - Target IP: `172.16.82.155`
-- Source MAC: `30:ed:a0:e3:34:c1`
 - Source MAC: `30:ed:a0:e3:34:c1`
 - Destination MAC: `ff:ff:ff:ff:ff:ff`
 
@@ -188,7 +178,6 @@
 - Source IP: `172.16.82.155`
 - Target IP: `172.16.82.155`
 - Source MAC: `30:ed:a0:e3:34:c1`
-- Source MAC: `30:ed:a0:e3:34:c1`
 - Destination MAC: `ff:ff:ff:ff:ff:ff`
 
 ---
@@ -204,7 +193,6 @@
 **Key Fields:**
 - Source IP: `0.0.0.0`
 - Target IP: `172.16.82.155`
-- Source MAC: `30:ed:a0:e3:34:c1`
 - Source MAC: `30:ed:a0:e3:34:c1`
 - Destination MAC: `ff:ff:ff:ff:ff:ff`
 
@@ -222,7 +210,6 @@
 - Source IP: `172.16.82.155`
 - Target IP: `172.16.82.155`
 - Source MAC: `30:ed:a0:e3:34:c1`
-- Source MAC: `30:ed:a0:e3:34:c1`
 - Destination MAC: `ff:ff:ff:ff:ff:ff`
 
 ---
@@ -238,7 +225,6 @@
 **Key Fields:**
 - Source IP: `172.16.82.155`
 - Target IP: `172.16.82.155`
-- Source MAC: `30:ed:a0:e3:34:c1`
 - Source MAC: `30:ed:a0:e3:34:c1`
 - Destination MAC: `ff:ff:ff:ff:ff:ff`
 
@@ -275,7 +261,6 @@
 - Source IP: `172.16.82.155`
 - Target IP: `172.16.82.199`
 - Source MAC: `30:ed:a0:e3:34:c1`
-- Source MAC: `30:ed:a0:e3:34:c1`
 - Destination MAC: `ff:ff:ff:ff:ff:ff`
 
 ---
@@ -291,7 +276,6 @@
 **Key Fields:**
 - Source IP: `172.16.82.199`
 - Target IP: `172.16.82.155`
-- Source MAC: `ec:0d:9a:de:e2:80`
 - Source MAC: `ec:0d:9a:de:e2:80`
 - Destination MAC: `30:ed:a0:e3:34:c1`
 
@@ -480,7 +464,6 @@
 - Source IP: `0.0.0.0`
 - Target IP: `172.16.82.155`
 - Source MAC: `30:ed:a0:e3:34:c1`
-- Source MAC: `30:ed:a0:e3:34:c1`
 - Destination MAC: `ff:ff:ff:ff:ff:ff`
 
 ---
@@ -668,7 +651,6 @@
 - Source IP: `172.16.82.199`
 - Target IP: `172.16.82.155`
 - Source MAC: `ec:0d:9a:de:e2:80`
-- Source MAC: `ec:0d:9a:de:e2:80`
 - Destination MAC: `30:ed:a0:e3:34:c1`
 
 ---
@@ -684,7 +666,6 @@
 **Key Fields:**
 - Source IP: `172.16.82.155`
 - Target IP: `172.16.82.199`
-- Source MAC: `30:ed:a0:e3:34:c1`
 - Source MAC: `30:ed:a0:e3:34:c1`
 - Destination MAC: `ec:0d:9a:de:e2:80`
 
@@ -1478,7 +1459,6 @@
 **Key Fields:**
 - Source IP: `172.16.82.155`
 - Target IP: `172.16.82.155`
-- Source MAC: `30:ed:a0:e3:34:c1`
 - Source MAC: `30:ed:a0:e3:34:c1`
 - Destination MAC: `ff:ff:ff:ff:ff:ff`
 

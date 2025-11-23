@@ -15,11 +15,11 @@ This project implements a full-featured EtherNet/IP adapter device on the ESP32-
   - Support for Exclusive Owner, Input Only, and Listen Only connections
 
 - **MPU6050 IMU Integration**: 6-axis motion sensor support
-  - Roll and pitch angle calculations
-  - Ground angle (absolute tilt) measurement
-  - Sensor fusion for accurate orientation data
-  - Configurable byte offset in Input Assembly
-  - Calculates cylinder pressure requirements based on tool weight and angle
+  - Sensor fusion (complementary filter) for accurate orientation
+  - Fused angle from vertical calculation
+  - Cylinder pressure calculations for opposed cylinders
+  - Temperature monitoring
+  - Data mapped to Input Assembly 100 as DINTs
 
 - **Modbus TCP Server**: Standard Modbus TCP/IP server (port 502)
   - Input Registers 0-15 map to Input Assembly 100
@@ -39,8 +39,11 @@ This project implements a full-featured EtherNet/IP adapter device on the ESP32-
 
 
 - **RFC 5227 Compliant Network Configuration**: Address Conflict Detection (ACD)
-  - RFC 5227 compliant static IP assignment
-  - Configurable ACD timing parameters
+  - RFC 5227 compliant static IP assignment with deferred IP assignment
+  - Configurable ACD timing parameters (probe intervals, defensive ARP intervals)
+  - Active IP defense with periodic ARP probes
+  - ACD retry logic with configurable delay and max attempts
+  - User LED indication (GPIO27): blinks during normal operation, solid on ACD conflict
   - Custom lwIP modifications for EtherNet/IP requirements
 
 ## Hardware Requirements
@@ -73,7 +76,16 @@ EIP_GROUND_TRUTH/
 │   └── log_buffer/         # Log buffer component
 ├── eds/                     # EtherNet/IP EDS file
 ├── docs/                    # Documentation
+│   ├── ASSEMBLY_DATA_LAYOUT.md  # Byte-by-byte assembly layout
+│   ├── API_Endpoints.md         # Web API documentation
+│   ├── WIRESHARK_FILTERS.md     # Wireshark filters for debugging
+│   └── ExportSniff.md           # Example packet capture analysis
 ├── dependency_modifications/ # lwIP modifications
+├── tools/                   # Testing and debugging tools
+│   ├── test_acd_conflict.py     # ACD conflict simulator
+│   ├── send_conflict_arp.py      # ARP conflict sender
+│   ├── pdml_to_markdown.py      # Wireshark PDML converter
+│   └── analyze_arp_timing.py    # ARP timing analyzer
 ├── scripts/                 # Build scripts
 └── FirmwareImages/          # Compiled firmware binaries
 ```
@@ -139,14 +151,18 @@ Configuration can be done via:
 #### MPU6050 IMU
 
 The MPU6050 provides orientation data:
-- **Roll**: Rotation around X-axis (degrees)
-- **Pitch**: Rotation around Y-axis (degrees)
-- **Ground Angle**: Absolute tilt from vertical (degrees)
-- **Pressure Calculations**: Bottom and top cylinder pressures based on tool weight and angle
+- **Fused Angle**: Sensor fusion of accelerometer and gyroscope data (degrees from vertical)
+- **Cylinder Pressures**: Calculated pressures for two opposed cylinders based on angle
+- **Temperature**: Internal sensor temperature
+
+The sensor data is mapped to Input Assembly 100:
+- **DINT 0**: Fused angle (degrees * 100 for 2 decimal places)
+- **DINT 1**: Cylinder 1 pressure (PSI * 10 for 1 decimal place)
+- **DINT 2**: Cylinder 2 pressure (PSI * 10 for 1 decimal place)
+- **DINT 3**: MPU6050 temperature (Celsius * 100 for 2 decimal places)
 
 Configuration via web API:
 - Enable/disable sensor
-- Set byte offset in Input Assembly 100 (0-20, uses 20 bytes)
 - View real-time readings
 
 
@@ -155,8 +171,12 @@ Configuration via web API:
 The device exposes three assembly instances:
 
 - **Assembly 100 (Input)**: 32 bytes of input data
-  - MPU6050 sensor data (configurable offset, 20 bytes)
-  - Available space for other sensor data
+  - MPU6050 sensor data (16 bytes: 4 DINTs)
+    - DINT 0: Fused angle (degrees * 100)
+    - DINT 1: Cylinder 1 pressure (PSI * 10)
+    - DINT 2: Cylinder 2 pressure (PSI * 10)
+    - DINT 3: Temperature (Celsius * 100)
+  - Available space for other sensor data (bytes 16-31)
 
 - **Assembly 150 (Output)**: 32 bytes of output data
   - Tool weight (byte 30)
@@ -241,6 +261,8 @@ The device supports automatic rollback on failed updates and maintains two OTA p
 - **Serial Logging**: Available via UART (default 115200 baud)
 - **Web Log Buffer**: 32KB circular buffer accessible via web interface
 - **Log Levels**: Configurable via menuconfig
+- **Wireshark Filters**: See `docs/WIRESHARK_FILTERS.md` for ACD debugging filters
+- **Testing Tools**: See `tools/README.md` for ACD conflict simulators and network analysis tools
 
 ## Contributing
 
@@ -305,6 +327,7 @@ This project includes a modified version of lwIP from ESP-IDF v5.5.1. The lwIP m
 - [EtherNet/IP Specification](https://www.odva.org/)
 - [Modbus TCP/IP Specification](https://modbus.org/specs.php)
 - [RFC 5227 - IPv4 Address Conflict Detection](https://tools.ietf.org/html/rfc5227)
+- [MPU6050 Datasheet](https://www.invensense.com/products/motion-tracking/6-axis/mpu-6050/)
 
 ## Support
 

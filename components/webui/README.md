@@ -9,8 +9,8 @@ The Web UI component provides a modern, responsive web interface accessible via 
 ## Features
 
 - **Network Configuration**: Configure DHCP/Static IP, netmask, gateway, and DNS settings
-- **VL53L1x Sensor Configuration**: Full sensor parameter configuration with calibration support
-- **Real-time Sensor Monitoring**: Live distance readings with visual bar chart
+- **MPU6050 Sensor Configuration**: Enable/disable sensor and view real-time readings
+- **Real-time Sensor Monitoring**: Live orientation and pressure data
 - **EtherNet/IP Assembly Monitoring**: Bit-level visualization of Input and Output assemblies
 - **Modbus TCP Configuration**: Enable/disable Modbus TCP server
 - **OTA Firmware Updates**: Upload and install firmware updates via web interface
@@ -33,37 +33,20 @@ The main configuration page provides access to all device settings:
   - Information about Modbus data mapping
   - Settings persist across reboots
 
-- **VL53L1x Sensor Configuration Card**
+- **MPU6050 Sensor Configuration Card**
   - Enable/disable sensor
-  - Sensor data byte range selection (0-8, 9-17, or 18-26)
-  - Distance mode (SHORT <1.3m, LONG <4m)
-  - Timing budget configuration
-  - Inter-measurement period
-  - ROI (Region of Interest) settings
-  - Offset and Crosstalk calibration
-  - Signal/Sigma thresholds
-  - Threshold window configuration
-  - Interrupt polarity settings
-  - I2C address configuration
+  - View sensor status and readings
 
-### VL53L1x Status Page (`/vl53l1x`)
+### MPU6050 Status Page (`/mpu6050`)
 Real-time sensor monitoring dashboard:
 
 - **Sensor Readings**
-  - Distance (mm)
-  - Status code with human-readable descriptions
-  - Ambient light (kcps)
-  - Signal per SPAD (kcps)
-  - Number of SPADs
+  - Fused angle from vertical (degrees)
+  - Cylinder 1 pressure (PSI)
+  - Cylinder 2 pressure (PSI)
+  - Temperature (Celsius)
 
-- **Visual Distance Chart**
-  - Horizontal bar chart with gradient color (red to green)
-  - Dynamic scaling based on distance mode
-  - Updates every 250ms
-
-- **Error Status**
-  - Status code in parentheses
-  - Human-readable error descriptions
+- **Updates every 250ms**
 
 ### Input Assembly Page (`/inputassembly`)
 Bit-level visualization of EtherNet/IP Input Assembly 100:
@@ -97,76 +80,21 @@ All API endpoints return JSON responses.
 
 ### Configuration Endpoints
 
-#### `GET /api/config`
-Get current VL53L1x sensor configuration.
+#### `GET /api/sensor/status`
+Get current MPU6050 sensor status and readings.
 
 **Response:**
 ```json
 {
-  "distance_mode": 2,
-  "timing_budget_ms": 100,
-  "inter_measurement_ms": 100,
-  "roi_x_size": 16,
-  "roi_y_size": 16,
-  "roi_center_spad": 199,
-  "offset_mm": 0,
-  "xtalk_cps": 0,
-  "signal_threshold_kcps": 1024,
-  "sigma_threshold_mm": 15,
-  "threshold_low_mm": 0,
-  "threshold_high_mm": 0,
-  "threshold_window": 0,
-  "interrupt_polarity": 1,
-  "i2c_address": 41
-}
-```
-
-#### `POST /api/config`
-Update VL53L1x sensor configuration.
-
-**Request Body:**
-```json
-{
-  "distance_mode": 2,
-  "timing_budget_ms": 100,
-  "inter_measurement_ms": 100,
-  ...
-}
-```
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "message": "Configuration saved successfully"
+  "enabled": true,
+  "angle_deg": 12.34,
+  "pressure1_psi": 123.4,
+  "pressure2_psi": 876.6,
+  "temperature_c": 25.5
 }
 ```
 
 ### Status Endpoints
-
-#### `GET /api/status`
-Get current sensor status and readings.
-
-**Response:**
-```json
-{
-  "distance_mm": 1234,
-  "status": 0,
-  "ambient_kcps": 5678,
-  "sig_per_spad_kcps": 1234,
-  "num_spads": 16,
-  "distance_mode": 2,
-  "input_assembly_100": {
-    "raw_bytes": [0, 1, 2, ...],
-    "distance_mm": 1234,
-    "status": 0,
-    ...
-  },
-  "output_assembly_150": {
-    "raw_bytes": [0, 0, 0, ...]
-  }
-}
-```
 
 #### `GET /api/assemblies`
 Get EtherNet/IP assembly data.
@@ -175,52 +103,11 @@ Get EtherNet/IP assembly data.
 ```json
 {
   "input_assembly_100": {
-    "distance_mm": 1234,
-    "status": 0,
-    "ambient_kcps": 5678,
-    "sig_per_spad_kcps": 1234,
-    "num_spads": 16
+    "raw_bytes": [0, 1, 2, ...]
+  },
+  "output_assembly_150": {
+    "raw_bytes": [0, 0, 0, ...]
   }
-}
-```
-
-### Calibration Endpoints
-
-#### `POST /api/calibrate/offset`
-Trigger offset calibration.
-
-**Request Body:**
-```json
-{
-  "target_distance_mm": 100
-}
-```
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "offset_mm": 5,
-  "message": "Offset calibration completed"
-}
-```
-
-#### `POST /api/calibrate/xtalk`
-Trigger crosstalk calibration.
-
-**Request Body:**
-```json
-{
-  "target_distance_mm": 100
-}
-```
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "xtalk_cps": 1234,
-  "message": "Crosstalk calibration completed"
 }
 ```
 
@@ -326,38 +213,6 @@ Enable or disable the VL53L1x sensor.
 }
 ```
 
-#### `GET /api/sensor/byteoffset`
-Get sensor data byte offset configuration.
-
-**Response:**
-```json
-{
-  "start_byte": 0,
-  "end_byte": 8,
-  "range": "0-8"
-}
-```
-
-#### `POST /api/sensor/byteoffset`
-Set sensor data byte offset (0, 9, or 18).
-
-**Request Body:**
-```json
-{
-  "start_byte": 9
-}
-```
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "start_byte": 9,
-  "end_byte": 17,
-  "range": "9-17",
-  "message": "Sensor byte offset saved successfully"
-}
-```
 
 ### OTA Endpoints
 
@@ -424,25 +279,19 @@ Reboot the device.
 ### Data Storage
 
 - **Network Configuration**: Stored in OpENer's `g_tcpip` NVS namespace
-- **Sensor Configuration**: Stored in `vl53l1x_config` NVS namespace
 - **Modbus Configuration**: Stored in `system` NVS namespace
 - **Sensor Enabled State**: Stored in `system` NVS namespace
-- **Sensor Byte Offset**: Stored in `system` NVS namespace
 
 ### Sensor Data Mapping
 
-The VL53L1x sensor data is written to Input Assembly 100 (`g_assembly_data064`) at a configurable byte offset:
+The MPU6050 sensor data is written to Input Assembly 100 (`g_assembly_data064`) as 4 DINTs (16 bytes):
 
-- **Default**: Bytes 0-8
-- **Alternative Options**: Bytes 9-17 or 18-26
-- **Data Layout** (9 bytes):
-  - Bytes 0-1: Distance (mm, little-endian)
-  - Byte 2: Status
-  - Bytes 3-4: Ambient (kcps, little-endian)
-  - Bytes 5-6: Signal per SPAD (kcps, little-endian)
-  - Bytes 7-8: Number of SPADs (little-endian)
+- **Bytes 0-3**: DINT 0 - Fused angle (degrees * 100, little-endian)
+- **Bytes 4-7**: DINT 1 - Cylinder 1 pressure (PSI * 10, little-endian)
+- **Bytes 8-11**: DINT 2 - Cylinder 2 pressure (PSI * 10, little-endian)
+- **Bytes 12-15**: DINT 3 - Temperature (Celsius * 100, little-endian)
 
-When the sensor is disabled, the configured byte range is zeroed out.
+When the sensor is disabled, these bytes are zeroed out.
 
 ## Usage
 
@@ -463,18 +312,11 @@ When the sensor is disabled, the configured byte range is zeroed out.
 
 2. **Sensor Configuration**:
    - Navigate to Configuration page
-   - Configure sensor parameters in VL53L1x Sensor Configuration card
-   - Click "Save Sensor Configuration" or "Save Measurement Settings"
+   - Enable/disable sensor in MPU6050 Sensor Configuration card
    - Changes take effect immediately
 
-3. **Calibration**:
-   - Place target at known distance
-   - Enter target distance in Offset or Crosstalk field
-   - Click "Calibrate" button
-   - Sensor automatically restarts ranging after calibration
-
-4. **Monitoring**:
-   - Navigate to VL53L1x Status page for real-time readings
+3. **Monitoring**:
+   - Navigate to MPU6050 Status page for real-time readings
    - Navigate to Input/Output Assembly pages for bit-level data
 
 ### Firmware Update
@@ -546,15 +388,14 @@ This script extracts HTML from `webui_html.c` and updates all preview files.
 
 - All settings persist across reboots via NVS
 - Network configuration changes require a reboot to take effect
-- Sensor configuration changes take effect immediately
+- Sensor enable/disable changes take effect immediately
 - The web UI has no external dependencies (no CDN, all assets embedded)
 - The sensor navigation item is hidden when the sensor is disabled
-- Sensor configuration fields are hidden when the sensor is disabled (info box remains visible)
 
 ## Footer
 
 All pages display the footer:
 ```
-OpENer Ethernet/IP for ESP32-P4 | Adam G Sweeney 11-15-2025
+OpENer Ethernet/IP for ESP32-P4 | Adam G Sweeney
 ```
 
