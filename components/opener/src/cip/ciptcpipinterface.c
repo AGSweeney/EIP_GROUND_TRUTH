@@ -331,8 +331,11 @@ static struct {
 
 static void TcpipSetLastConflictState(CipUsint activity) {
   s_tcpip_last_conflict.activity = activity;
-  memset(s_tcpip_last_conflict.remote_mac, 0, sizeof(s_tcpip_last_conflict.remote_mac));
-  memset(s_tcpip_last_conflict.raw_data, 0, sizeof(s_tcpip_last_conflict.raw_data));
+  /* MAC and raw_data persist across activity changes to maintain conflict history.
+   * They are only set when a conflict is detected (via CipTcpIpSetLastAcdMac/RawData)
+   * and should remain available for diagnostic purposes even after the conflict
+   * is resolved or ACD transitions to a different state.
+   */
 }
 
 /* MODIFICATIONS BY: Adam G. Sweeney <agsweeney@gmail.com>

@@ -5,7 +5,7 @@
 This document provides a comprehensive record of all modifications made to the LWIP stack and configuration changes for the ESP32-P4 OpENer EtherNet/IP project. These changes include RFC 5227 compliance implementation, performance optimizations, and task affinity configurations.
 
 **ESP-IDF Version**: v5.5.1  
-**LWIP Component Path**: `C:\Users\agswe\esp\v5.5.1\esp-idf\components\lwip\`
+**LWIP Component Path**: `components/lwip/` (local override)
 
 ---
 
@@ -137,7 +137,7 @@ This document provides a comprehensive record of all modifications made to the L
 
 #### `lwip/src/core/ipv4/acd.c`
 
-**File Path**: `C:\Users\agswe\esp\v5.5.1\esp-idf\components\lwip\lwip\src\core\ipv4\acd.c`
+**File Path**: `components/lwip/lwip/src/core/ipv4/acd.c`
 
 **Changes Made**:
 
@@ -160,7 +160,29 @@ This document provides a comprehensive record of all modifications made to the L
    - Removes IP address when conflict detected for static IPs
    - Calls user callback with conflict state
 
-**Rationale**: Implements RFC 5227 compliant behavior - IP assigned only after ACD confirms safety, removed on conflict.
+4. **Disabled ACD Diagnostic Logging**:
+   - Changed `ACD_DIAG` macro to no-op: `#define ACD_DIAG(fmt, ...) ((void)0)`
+   - Modified `acd_log_mac()` to be a no-op to suppress unused variable warnings
+   - Reduces log noise while keeping conflict detection logs
+
+5. **Active IP Defense Implementation**:
+   - Added periodic defensive ARP probes in `ACD_STATE_ONGOING`
+   - Defensive probes use source IP = 0.0.0.0 (matching Rockwell PLC behavior)
+   - Interval configurable via `CONFIG_OPENER_ACD_PERIODIC_DEFEND_INTERVAL_MS` (default: 90 seconds)
+   - Implemented in `acd_tmr()` function
+
+6. **EtherNet/IP Conflict Reporting Integration**:
+   - Added forward declarations for OpENer functions (`CipTcpIpSetLastAcdMac`, `CipTcpIpSetLastAcdRawData`)
+   - Calls these functions at conflict detection points to populate EtherNet/IP Attribute #11
+   - Captures MAC address and raw ARP frame data for diagnostic purposes
+
+7. **Natural State Machine Flow**:
+   - The ACD state machine naturally transitions: PROBE_WAIT → PROBING → ANNOUNCE_WAIT → ANNOUNCING → ONGOING
+   - The `ACD_IP_OK` callback fires **after** the announce phase completes (when transitioning to ONGOING state)
+   - The application (`main/main.c`) does not manually stop/restart ACD - it relies on the natural state machine transition
+   - This ensures the probe sequence completes correctly without interference
+
+**Rationale**: Implements RFC 5227 compliant behavior - IP assigned only after ACD confirms safety, removed on conflict. Adds active defense and EtherNet/IP integration. Uses natural state machine flow to avoid interfering with probe sequence.
 
 ---
 
@@ -468,6 +490,9 @@ BaseType_t result = xTaskCreatePinnedToCore(opener_thread,
 - ✅ Configurable ACD timings
 - ✅ Task affinity control (Core 0)
 - ✅ IRAM optimization enabled
+- ✅ Active IP defense with periodic ARP probes
+- ✅ EtherNet/IP conflict reporting integration
+- ✅ Reduced ACD diagnostic logging (conflicts only)
 
 ### Build Requirements
 

@@ -749,6 +749,19 @@ acd_arp_reply(struct netif *netif, struct etharp_hdr *hdr)
          */
         if (ip4_addr_eq(&sipaddr, &acd->ipaddr) &&
             !eth_addr_eq(&netifaddr, &hdr->shwaddr)) {
+          /* MODIFICATION: Added detailed logging to debug false positive conflict detection
+           * Added by: Adam G. Sweeney <agsweeney@gmail.com>
+           * Log MAC addresses and IP addresses to identify what's triggering conflict detection
+           */
+#ifdef ESP_PLATFORM
+          ESP_LOGW(ACD_LOG_TAG, "ACD: Conflicting ARP detected in ONGOING state - sipaddr=%d.%d.%d.%d, our_ip=%d.%d.%d.%d, their_mac=%02x:%02x:%02x:%02x:%02x:%02x, our_mac=%02x:%02x:%02x:%02x:%02x:%02x",
+                   ip4_addr1_16(&sipaddr), ip4_addr2_16(&sipaddr), ip4_addr3_16(&sipaddr), ip4_addr4_16(&sipaddr),
+                   ip4_addr1_16(&acd->ipaddr), ip4_addr2_16(&acd->ipaddr), ip4_addr3_16(&acd->ipaddr), ip4_addr4_16(&acd->ipaddr),
+                   hdr->shwaddr.addr[0], hdr->shwaddr.addr[1], hdr->shwaddr.addr[2],
+                   hdr->shwaddr.addr[3], hdr->shwaddr.addr[4], hdr->shwaddr.addr[5],
+                   netifaddr.addr[0], netifaddr.addr[1], netifaddr.addr[2],
+                   netifaddr.addr[3], netifaddr.addr[4], netifaddr.addr[5]);
+#endif
           LWIP_DEBUGF(ACD_DEBUG | LWIP_DBG_TRACE | LWIP_DBG_STATE | LWIP_DBG_LEVEL_WARNING,
                       ("acd_arp_reply(): Conflicting ARP-Packet detected\n"));
           

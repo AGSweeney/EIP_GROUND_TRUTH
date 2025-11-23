@@ -26,6 +26,8 @@ Since this directory exists, ESP-IDF will use this version instead of the system
   - Active IP defense with periodic ARP probes
   - EtherNet/IP conflict reporting integration
   - Custom timing configuration via Kconfig
+  - Natural state machine flow (PROBE_WAIT → PROBING → ANNOUNCE_WAIT → ANNOUNCING → ONGOING)
+  - `ACD_IP_OK` callback fires after announce phase completes (when in ONGOING state)
 
 ## Original Source
 

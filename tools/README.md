@@ -130,6 +130,48 @@ python pdml_to_markdown.py input.pdml output.md
 
 This tool is useful for documenting network captures and analyzing ACD behavior.
 
+## ACD Retry Timing Test
+
+`test_acd_retry_timing.py` - Comprehensive timed test for ACD retry logic verification.
+
+### Usage
+
+```bash
+# Basic test with default settings (10s retry delay, 5 max attempts)
+python test_acd_retry_timing.py --ip 172.16.82.100 --esp32-mac 30:ed:a0:e3:34:c1 --interface eth0
+
+# Test with specific retry delay and max attempts
+python test_acd_retry_timing.py --ip 172.16.82.100 --esp32-mac 30:ed:a0:e3:34:c1 --interface eth0 --retry-delay 10000 --max-attempts 5
+
+# Extended test duration (5 minutes)
+python test_acd_retry_timing.py --ip 172.16.82.100 --esp32-mac 30:ed:a0:e3:34:c1 --interface eth0 --duration 300
+```
+
+### Features
+
+- **Automatic Conflict Triggering**: Responds to ESP32 ARP probes to trigger conflicts
+- **Retry Timing Analysis**: Measures intervals between retry attempts
+- **Timing Verification**: Verifies retry intervals match configured delay (with ±20% tolerance)
+- **Max Attempts Verification**: Confirms device respects maximum retry attempts
+- **Detailed Reporting**: Provides comprehensive test report with statistics
+
+### Test Report Includes
+
+- Total probes detected
+- Retry attempts detected
+- Retry interval statistics (average, min, max)
+- Timing accuracy percentage
+- Probe sequence analysis per attempt
+- Verification of max attempts behavior
+
+### Expected Behavior
+
+When retry logic is working correctly:
+- Device should retry after ~10 seconds (default `CONFIG_OPENER_ACD_RETRY_DELAY_MS`)
+- Retry intervals should match configured delay within ±20% tolerance
+- Device should stop retrying after max attempts (default: 5)
+- Each retry attempt should send 3 ARP probes
+
 ## ARP Timing Analyzer
 
 `analyze_arp_timing.py` - Analyze ARP timing patterns from Wireshark CSV exports.

@@ -40,10 +40,12 @@ This project implements a full-featured EtherNet/IP adapter device on the ESP32-
 
 - **RFC 5227 Compliant Network Configuration**: Address Conflict Detection (ACD)
   - RFC 5227 compliant static IP assignment with deferred IP assignment
+  - Natural ACD state machine flow (PROBE_WAIT → PROBING → ANNOUNCE_WAIT → ANNOUNCING → ONGOING)
   - Configurable ACD timing parameters (probe intervals, defensive ARP intervals)
-  - Active IP defense with periodic ARP probes
+  - Active IP defense with periodic ARP probes from `0.0.0.0` (matching Rockwell PLC behavior)
   - ACD retry logic with configurable delay and max attempts
   - User LED indication (GPIO27): blinks during normal operation, solid on ACD conflict
+  - **EtherNet/IP Conflict Reporting**: Automatic capture and storage of conflict data in TCP/IP Interface Object Attribute #11
   - Custom lwIP modifications for EtherNet/IP requirements
 
 ## Hardware Requirements
@@ -328,6 +330,13 @@ This project includes a modified version of lwIP from ESP-IDF v5.5.1. The lwIP m
 - [Modbus TCP/IP Specification](https://modbus.org/specs.php)
 - [RFC 5227 - IPv4 Address Conflict Detection](https://tools.ietf.org/html/rfc5227)
 - [MPU6050 Datasheet](https://www.invensense.com/products/motion-tracking/6-axis/mpu-6050/)
+
+## Documentation
+
+- **[ACD and EtherNet/IP Conflict Reporting](docs/ACD_CONFLICT_REPORTING.md)** - Complete guide to ACD conflict detection and EtherNet/IP integration
+- **[Assembly Data Layout](docs/ASSEMBLY_DATA_LAYOUT.md)** - Byte-by-byte assembly data documentation
+- **[API Endpoints](docs/API_Endpoints.md)** - Web UI REST API documentation
+- **[Wireshark Filters](docs/WIRESHARK_FILTERS.md)** - Network debugging filters for ACD
 
 ## Support
 

@@ -128,8 +128,17 @@ arp.src.hw_mac == 30:ed:a0:e3:34:c1 || arp.dst.hw_mac == 30:ed:a0:e3:34:c1
 ## RFC 5227 ACD Behavior
 
 1. **Probe Phase**: Device sends 3 ARP probes (source IP = 0.0.0.0) asking "Who has IP X?"
+   - Probes are sent with random intervals between PROBE_MIN and PROBE_MAX (typically 1-2 seconds)
+   - Filter: `arp.opcode == 1 && arp.src.proto_ipv4 == 0.0.0.0`
+
 2. **Announce Phase**: If no conflicts, device sends 2 ARP announcements (source IP = IP X)
-3. **Ongoing Phase**: Device periodically sends defensive ARP announcements
+   - Announcements are sent after successful probe phase
+   - Filter: `arp.opcode == 1 && arp.src.proto_ipv4 == arp.dst.proto_ipv4 && arp.src.proto_ipv4 != 0.0.0.0`
+
+3. **Ongoing Phase**: Device periodically sends defensive ARP probes (source IP = 0.0.0.0)
+   - Defensive probes are sent every ~90 seconds (configurable via `CONFIG_OPENER_ACD_PERIODIC_DEFEND_INTERVAL_MS`)
+   - These are probes (not announcements) to match Rockwell PLC behavior
+   - Filter: `arp.opcode == 1 && arp.src.proto_ipv4 == 0.0.0.0 && arp.src.hw_mac == 30:ed:a0:e3:34:c1`
 
 Use these filters to verify each phase is working correctly.
 

@@ -116,275 +116,47 @@ Get system logs from the log buffer.
 
 ---
 
-## VL53L1x Sensor Configuration
+## MPU6050 Sensor Status
 
-### GET /api/config
+### GET /api/mpu6050/status
 
-Get VL53L1x sensor configuration.
-
-**Response:**
-```json
-{
-  "distance_mode": 2,
-  "timing_budget_ms": 50,
-  "inter_measurement_ms": 50,
-  "roi_x_size": 16,
-  "roi_y_size": 16,
-  "roi_center_spad": 199,
-  "offset_mm": 0,
-  "xtalk_cps": 0,
-  "signal_threshold_kcps": 1024,
-  "sigma_threshold_mm": 15,
-  "threshold_low_mm": 0,
-  "threshold_high_mm": 1000,
-  "threshold_window": 0,
-  "interrupt_polarity": 0,
-  "i2c_address": 41
-}
-```
-
-### POST /api/config
-
-Update VL53L1x sensor configuration. All fields are optional.
-
-**Request:**
-```json
-{
-  "distance_mode": 2,
-  "timing_budget_ms": 50,
-  "inter_measurement_ms": 50,
-  "roi_x_size": 16,
-  "roi_y_size": 16,
-  "roi_center_spad": 199,
-  "offset_mm": 0,
-  "xtalk_cps": 0,
-  "signal_threshold_kcps": 1024,
-  "sigma_threshold_mm": 15,
-  "threshold_low_mm": 0,
-  "threshold_high_mm": 1000,
-  "threshold_window": 0,
-  "interrupt_polarity": 0,
-  "i2c_address": 41
-}
-```
+Get MPU6050 sensor status and current readings.
 
 **Response:**
 ```json
 {
-  "status": "ok",
-  "message": "Configuration saved successfully"
-}
-```
-
-**Notes:**
-- Configuration is validated before saving
-- Changes are applied immediately if the sensor is initialized
-- Configuration is persisted to NVS
-
----
-
-### GET /api/status
-
-Get VL53L1x sensor status and current readings, plus EtherNet/IP assembly data.
-
-**Response:**
-```json
-{
-  "distance_mm": 1234,
-  "status": 0,
-  "ambient_kcps": 1376,
-  "sig_per_spad_kcps": 3584,
-  "num_spads": 256,
-  "distance_mode": 2,
-  "input_assembly_100": {
-    "raw_bytes": [0, 1, 2, ...]
-  },
-  "output_assembly_150": {
-    "led": false,
-    "raw_bytes": [0, 0, 0, ...]
-  }
+  "enabled": true,
+  "angle_deg": 12.34,
+  "pressure1_psi": 123.4,
+  "pressure2_psi": 87.6,
+  "temperature_c": 25.5
 }
 ```
 
 **Fields:**
-- `distance_mm`: Distance measurement in millimeters
-- `status`: Sensor status code (0 = success)
-- `ambient_kcps`: Ambient light level in kcps
-- `sig_per_spad_kcps`: Signal per SPAD in kcps
-- `num_spads`: Number of SPADs used
-- `distance_mode`: Current distance mode (1=SHORT, 2=LONG)
-- `input_assembly_100`: Input Assembly 100 data (32 bytes)
-- `output_assembly_150`: Output Assembly 150 data (32 bytes)
+- `enabled`: Whether MPU6050 is enabled
+- `angle_deg`: Fused angle from vertical in degrees
+- `pressure1_psi`: Cylinder 1 pressure in PSI
+- `pressure2_psi`: Cylinder 2 pressure in PSI
+- `temperature_c`: MPU6050 internal temperature in Celsius
 
 ---
 
 ### GET /api/assemblies
 
-Get EtherNet/IP assembly data (simplified view).
+Get EtherNet/IP assembly data.
 
 **Response:**
 ```json
 {
   "input_assembly_100": {
-    "distance_mm": 1234,
-    "status": 0,
-    "ambient_kcps": 1376,
-    "sig_per_spad_kcps": 3584,
-    "num_spads": 256
+    "raw_bytes": [0, 1, 2, ...]
   },
   "output_assembly_150": {
-    "led": false
-  },
-  "config_assembly_151": {
-    "size": 10
+    "raw_bytes": [0, 0, 0, ...]
   }
 }
 ```
-
----
-
-### GET /api/assemblies/sizes
-
-Get assembly buffer sizes.
-
-**Response:**
-```json
-{
-  "input_assembly_size": 32,
-  "output_assembly_size": 32
-}
-```
-
----
-
-### POST /api/calibrate/offset
-
-Trigger offset calibration for VL53L1x sensor.
-
-**Request:**
-```json
-{
-  "target_distance_mm": 100
-}
-```
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "offset_mm": -5,
-  "message": "Offset calibration successful"
-}
-```
-
-**Notes:**
-- Requires sensor to be initialized
-- Calibration stops ranging temporarily
-- Offset is clamped to -128 to +127 mm range
-- Configuration is automatically saved and reapplied
-
----
-
-### POST /api/calibrate/xtalk
-
-Trigger crosstalk (xtalk) calibration for VL53L1x sensor.
-
-**Request:**
-```json
-{
-  "target_distance_mm": 100
-}
-```
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "xtalk_cps": 1024,
-  "message": "Xtalk calibration successful"
-}
-```
-
-**Notes:**
-- Requires sensor to be initialized
-- Calibration stops ranging temporarily
-- Configuration is automatically saved and reapplied
-
----
-
-### GET /api/sensor/enabled
-
-Get VL53L1x sensor enabled state.
-
-**Response:**
-```json
-{
-  "enabled": true
-}
-```
-
-### POST /api/sensor/enabled
-
-Set VL53L1x sensor enabled state. Changes take effect immediately.
-
-**Request:**
-```json
-{
-  "enabled": true
-}
-```
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "enabled": true,
-  "message": "Sensor state saved successfully"
-}
-```
-
----
-
-### GET /api/sensor/byteoffset
-
-Get VL53L1x sensor data byte offset in Input Assembly 100.
-
-**Response:**
-```json
-{
-  "start_byte": 0,
-  "end_byte": 8,
-  "range": "0-8"
-}
-```
-
-**Notes:**
-- Valid ranges: 0-8, 9-17, or 18-26
-- Sensor data uses 9 bytes
-
-### POST /api/sensor/byteoffset
-
-Set VL53L1x sensor data byte offset. Changes take effect immediately.
-
-**Request:**
-```json
-{
-  "start_byte": 0
-}
-```
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "start_byte": 0,
-  "end_byte": 8,
-  "range": "0-8",
-  "message": "Sensor byte offset saved successfully"
-}
-```
-
-**Valid values:** `0`, `9`, or `18`
 
 ---
 
@@ -423,89 +195,7 @@ Set MPU6050 IMU enabled state.
 
 ---
 
-### GET /api/mpu6050/byteoffset
-
-Get MPU6050 data byte offset in Input Assembly 100.
-
-**Response:**
-```json
-{
-  "start_byte": 0,
-  "end_byte": 11,
-  "range": "0-11"
-}
-```
-
-**Notes:**
-- MPU6050 data uses 12 bytes (3 int32_t: roll, pitch, ground_angle as scaled integers)
-- Values are stored as `degrees * 10000` (e.g., 2.51 degrees = 25100)
-- Valid start_byte: 0-20
-
-### POST /api/mpu6050/byteoffset
-
-Set MPU6050 data byte offset.
-
-**Request:**
-```json
-{
-  "start_byte": 0
-}
-```
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "start_byte": 0,
-  "end_byte": 11,
-  "message": "MPU6050 byte offset saved successfully"
-}
-```
-
-**Valid values:** `0` to `20` (must fit 12 bytes within 32-byte assembly)
-
----
-
-### GET /api/mpu6050/status
-
-Get MPU6050 IMU sensor status and current readings.
-
-**Response:**
-```json
-{
-  "roll": 12.34,
-  "pitch": -5.67,
-  "ground_angle": 13.45,
-  "roll_scaled": 123400,
-  "pitch_scaled": -56700,
-  "ground_angle_scaled": 134500,
-  "enabled": true,
-  "byte_offset": 18,
-  "byte_range_start": 18,
-  "byte_range_end": 29
-}
-```
-
-**Fields:**
-- `roll`: Roll angle in degrees (rotation around X-axis) as float
-- `pitch`: Pitch angle in degrees (rotation around Y-axis) as float
-- `ground_angle`: Absolute ground angle in degrees (total tilt angle relative to horizontal plane) as float
-- `roll_scaled`: Roll angle as scaled integer (degrees * 10000, e.g., 2.51° = 25100)
-- `pitch_scaled`: Pitch angle as scaled integer (degrees * 10000)
-- `ground_angle_scaled`: Ground angle as scaled integer (degrees * 10000)
-- `enabled`: Whether MPU6050 is enabled
-- `byte_offset`: Starting byte offset in Input Assembly 100
-- `byte_range_start`: Starting byte of MPU6050 data range
-- `byte_range_end`: Ending byte of MPU6050 data range
-
-**Notes:**
-- Data is read from Input Assembly 100 at the configured byte offset
-- MPU6050 uses 12 bytes: 3 int32_t values (roll, pitch, ground_angle) stored as scaled integers
-- Values are stored as `degrees * 10000` (e.g., 2.51 degrees = 25100)
-- Values are calculated from accelerometer data using orientation algorithms
-- Roll and pitch are in degrees (typically -180 to +180 range)
-- Ground angle is calculated as `sqrt(roll² + pitch²)` and represents total tilt regardless of direction
-- The scaled integer values are what's actually stored in the Input Assembly (little-endian int32_t format)
+**Note:** MPU6050 data is fixed at bytes 0-15 (16 bytes) in Input Assembly 100. The byte offset is not configurable.
 
 ---
 

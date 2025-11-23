@@ -182,7 +182,8 @@ static struct acd s_static_ip_acd;
 static bool s_acd_registered = false;
 static SemaphoreHandle_t s_acd_sem = NULL;
 static SemaphoreHandle_t s_acd_registration_sem = NULL;  // Semaphore to wait for ACD registration
-static acd_callback_enum_t s_acd_last_state = ACD_IP_OK;  // Initialize to OK state, not conflict state
+static acd_callback_enum_t s_acd_last_state = ACD_IP_OK;  // Will be set by callback when ACD completes
+static bool s_acd_callback_received = false;  // Track if callback was actually received
 static bool s_acd_probe_pending = false;
 static esp_netif_ip_info_t s_pending_static_ip_cfg = {0};
 #if LWIP_ACD_RFC5227_COMPLIANT_STATIC
@@ -321,13 +322,16 @@ static void user_led_stop_flash(void);
 static void tcpip_acd_conflict_callback(struct netif *netif, acd_callback_enum_t state) {
     ESP_LOGI(TAG, "ACD callback received: state=%d (0=IP_OK, 1=RESTART_CLIENT, 2=DECLINE)", (int)state);
     s_acd_last_state = state;
+    s_acd_callback_received = true;  // Mark that callback was actually received
     switch (state) {
         case ACD_IP_OK:
             g_tcpip.status &= ~(kTcpipStatusAcdStatus | kTcpipStatusAcdFault);
-            CipTcpIpSetLastAcdActivity(0);
+            // ACD_IP_OK means probe phase completed successfully and IP is assigned.
+            // ACD now enters ONGOING state for periodic defense, so set activity = 1.
+            CipTcpIpSetLastAcdActivity(1);
             // Resume LED blinking when IP is OK (no conflict)
             user_led_start_flash();
-            ESP_LOGI(TAG, "ACD: IP OK - no conflict detected");
+            ESP_LOGI(TAG, "ACD: IP OK - no conflict detected, entering ongoing defense phase");
 #if CONFIG_OPENER_ACD_RETRY_ENABLED
             // Reset retry count on successful IP assignment
             s_acd_retry_count = 0;
@@ -342,6 +346,17 @@ static void tcpip_acd_conflict_callback(struct netif *netif, acd_callback_enum_t
                 opener_configure_dns(s_pending_esp_netif);
                 s_acd_probe_pending = false;
                 ESP_LOGI(TAG, "RFC 5227: IP assigned after ACD confirmation");
+            }
+#else
+            /* Legacy mode: Assign IP if it hasn't been assigned yet (callback fired after timeout) */
+            if (s_acd_probe_pending && netif != NULL) {
+                esp_netif_t *esp_netif = esp_netif_get_handle_from_netif_impl(netif);
+                if (esp_netif != NULL && s_pending_static_ip_cfg.ip.addr != 0) {
+                    ESP_LOGI(TAG, "Legacy ACD: Assigning IP " IPSTR " after callback confirmation", IP2STR(&s_pending_static_ip_cfg.ip));
+                    esp_netif_set_ip_info(esp_netif, &s_pending_static_ip_cfg);
+                    opener_configure_dns(esp_netif);
+                    s_acd_probe_pending = false;
+                }
             }
 #endif
             break;
@@ -457,6 +472,9 @@ static void tcpip_acd_start_cb(void *arg) {
         // Re-add to netif's acd_list so timer processes it
         acd_add(ctx->netif, &s_static_ip_acd, tcpip_acd_conflict_callback);
         
+        // Set activity = 1 (OngoingDetection) since we're entering ONGOING state
+        CipTcpIpSetLastAcdActivity(1);
+        
         // Set ttw to defense interval so timer counts down before first probe
 #ifdef CONFIG_OPENER_ACD_PERIODIC_DEFEND_INTERVAL_MS
         if (CONFIG_OPENER_ACD_PERIODIC_DEFEND_INTERVAL_MS > 0) {
@@ -518,9 +536,10 @@ static bool tcpip_perform_acd(struct netif *netif, const ip4_addr_t *ip) {
         return true;  // Return true to allow IP assignment (ACD was cancelled or completed)
     }
 
-    // Initialize to ACD_IP_OK: timeout without callback means no conflict
-    // Only explicit ACD_RESTART_CLIENT/ACD_DECLINE from callback indicates conflict
-    s_acd_last_state = ACD_IP_OK;
+    // Initialize callback tracking: timeout without callback means probe sequence hasn't completed yet
+    // Only explicit callback (ACD_IP_OK, ACD_RESTART_CLIENT, or ACD_DECLINE) indicates completion
+    s_acd_callback_received = false;
+    s_acd_last_state = ACD_IP_OK;  // Default assumption, but won't be used unless callback_received is true
     CipTcpIpSetLastAcdActivity(2);
 
     // Verify netif is still valid (may have been invalidated)
@@ -676,7 +695,7 @@ static bool tcpip_perform_acd(struct netif *netif, const ip4_addr_t *ip) {
             CipTcpIpSetLastAcdActivity(3);
             return false;
         }
-    } else if (s_acd_last_state == ACD_IP_OK) {
+    } else if (s_acd_callback_received && s_acd_last_state == ACD_IP_OK) {
         // MODIFICATION: ACD callback was received but semaphore wait timed out
         // Added by: Adam G. Sweeney <agsweeney@gmail.com>
         // This is OK - callback set state to IP_OK, so we can safely continue
@@ -698,19 +717,17 @@ static bool tcpip_perform_acd(struct netif *netif, const ip4_addr_t *ip) {
         return false;
     }
     
-    // Timeout without callback - ACD probe sequence might still be in progress
-    // In legacy mode, we continue but log a warning
-    // Note: This means we might assign IP even if a conflict exists (not ideal, but legacy mode limitation)
-    ESP_LOGW(TAG, "ACD probe wait timed out (state=%d) - no callback received yet", (int)s_acd_last_state);
-    ESP_LOGW(TAG, "Note: This is legacy ACD mode. Probe may still be running. For proper RFC 5227 compliance, enable RFC 5227 mode.");
-    ESP_LOGW(TAG, "Continuing with IP assignment - if conflict exists, it may be detected later");
-    CipTcpIpSetLastAcdActivity(0);
+    // Timeout without callback - ACD probe sequence is still in progress
+    // Don't assign IP until callback confirms completion (ACD_IP_OK)
+    // The callback will fire when announce phase completes (~6-10 seconds total)
+    // Return true here to indicate "no conflict detected yet, waiting for callback"
+    // This is different from returning false (which indicates actual conflict)
+    ESP_LOGW(TAG, "ACD probe wait timed out (state=%d) - callback not received yet (probe sequence still running)", (int)s_acd_last_state);
+    ESP_LOGW(TAG, "Note: ACD probe sequence can take 6-10 seconds (probes + announcements). Waiting for callback...");
+    ESP_LOGW(TAG, "IP assignment will occur when ACD_IP_OK callback is received.");
+    // Return true to indicate "no conflict, but waiting for callback to assign IP"
+    // The callback will trigger IP assignment when it fires (see tcpip_acd_conflict_callback)
     return true;
-
-    ESP_LOGE(TAG, "ACD reported conflict (state=%d)", (int)s_acd_last_state);
-    tcpip_callback_with_block(tcpip_acd_stop_cb, NULL, 1);
-    CipTcpIpSetLastAcdActivity(3);
-    return false;
 }
 #endif /* !LWIP_ACD_RFC5227_COMPLIANT_STATIC */
 
@@ -800,7 +817,10 @@ static void tcpip_try_pending_acd(esp_netif_t *netif, struct netif *lwip_netif) 
     ESP_LOGD(TAG, "Legacy ACD: Starting probe sequence for IP " IPSTR " BEFORE IP assignment", IP2STR(&desired_ip));
     
     // Run ACD BEFORE assigning IP to ensure conflicts are detected first
-    if (!tcpip_perform_acd(lwip_netif, &desired_ip)) {
+    bool acd_result = tcpip_perform_acd(lwip_netif, &desired_ip);
+    
+    // Check if callback was received and indicates conflict
+    if (s_acd_callback_received && (s_acd_last_state == ACD_DECLINE || s_acd_last_state == ACD_RESTART_CLIENT)) {
         ESP_LOGE(TAG, "ACD conflict detected for " IPSTR " - NOT assigning IP", IP2STR(&desired_ip));
         ESP_LOGW(TAG, "IP assignment cancelled due to ACD conflict");
         g_tcpip.status |= kTcpipStatusAcdStatus | kTcpipStatusAcdFault;
@@ -812,16 +832,25 @@ static void tcpip_try_pending_acd(esp_netif_t *netif, struct netif *lwip_netif) 
         return;
     }
     
-    // ACD completed successfully (or timed out without conflict) - safe to assign IP
-    ESP_LOGI(TAG, "Legacy ACD: No conflict detected - assigning IP " IPSTR, IP2STR(&desired_ip));
-    ESP_ERROR_CHECK(esp_netif_set_ip_info(netif, &s_pending_static_ip_cfg));
-    opener_configure_dns(netif);
-    s_acd_probe_pending = false;
-    CipTcpIpSetLastAcdActivity(0);
-
-    // Do NOT manually transition to ONGOING state: ACD timer will naturally transition
-    // PROBE_WAIT → PROBING → ANNOUNCE_WAIT → ANNOUNCING → ONGOING
-    // Manual transition only needed when skipping probe phase (handled in tcpip_acd_start_cb)
+    // If callback was received with ACD_IP_OK, assign IP now
+    // Otherwise (timeout without callback), IP will be assigned when callback fires
+    if (s_acd_callback_received && s_acd_last_state == ACD_IP_OK) {
+        ESP_LOGI(TAG, "Legacy ACD: No conflict detected - assigning IP " IPSTR, IP2STR(&desired_ip));
+        ESP_ERROR_CHECK(esp_netif_set_ip_info(netif, &s_pending_static_ip_cfg));
+        opener_configure_dns(netif);
+        s_acd_probe_pending = false;
+    } else {
+        // Timeout without callback - probe sequence still running
+        // IP will be assigned when ACD_IP_OK callback fires (see tcpip_acd_conflict_callback)
+        ESP_LOGI(TAG, "Legacy ACD: Probe sequence in progress - IP will be assigned when callback fires");
+    }
+    
+    // ACD_IP_OK callback fires AFTER announce phase completes, which means ACD is already in ONGOING state.
+    // The ACD timer will naturally transition: PROBE_WAIT → PROBING → ANNOUNCE_WAIT → ANNOUNCING → ONGOING
+    // So we don't need to manually transition - ACD is already in ONGOING state and will send periodic defensive ARPs.
+    // Just set activity = 1 to indicate ongoing defense phase.
+    CipTcpIpSetLastAcdActivity(1);
+    ESP_LOGD(TAG, "Legacy ACD: ACD is in ONGOING state (callback fired after announce phase), periodic defense active");
     
     // Cancel any pending retry timers (retry handler checks s_acd_probe_pending and skips gracefully)
 #endif
