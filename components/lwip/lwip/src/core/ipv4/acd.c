@@ -627,7 +627,7 @@ acd_tmr(void)
       ESP_LOGE(ACD_LOG_TAG, "First entry: ptr=%p, state=%d, next=%p", first, first ? (int)first->state : -1, first ? first->next : NULL);
     }
     if (acd_entry_count > 0 && (s_acd_tmr_call_count <= 5 || s_acd_tmr_call_count % 10 == 0)) {
-      ESP_LOGI(ACD_LOG_TAG, "ACD timer: Processed %d ACD entry/entries on netif %c%c%d", 
+      ESP_LOGD(ACD_LOG_TAG, "ACD timer: Processed %d ACD entry/entries on netif %c%c%d", 
                acd_entry_count, netif->name[0], netif->name[1], netif->num);
     }
 #endif
