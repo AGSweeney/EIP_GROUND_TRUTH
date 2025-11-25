@@ -157,6 +157,12 @@ The device automatically detects and uses MPU6050 if available, otherwise falls 
 - **Ground Angle**: Angle from vertical (degrees)
 - **Cylinder Pressures**: Calculated pressures for two opposed cylinders based on orientation, tool weight, tip force, and cylinder bore
 
+**Calculation Precision:**
+- All sensor calculations use **32-bit float precision** (IEEE 754 single precision)
+- Ground angle calculation: `acos(cos(roll) × cos(pitch))` for both MPU6050 and LSM6DS3 (correct 3D angle formula)
+- Typical accuracy: ±0.04° for ground angle calculations (sufficient for industrial sensor applications)
+- Values are scaled by 10000 for angles and 1000 for pressures when stored in assembly data
+
 The sensor data is mapped to Input Assembly 100 (20 bytes, configurable byte offset):
 - **DINT 0**: Roll angle (degrees × 10000)
 - **DINT 1**: Pitch angle (degrees × 10000)

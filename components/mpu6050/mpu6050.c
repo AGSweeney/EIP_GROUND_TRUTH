@@ -31,6 +31,9 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+#define DEG_TO_RAD ((float)M_PI / 180.0f)
+#define RAD_TO_DEG (180.0f / (float)M_PI)
+
 #define MPU6050_I2C_TIMEOUT_MS 100
 
 // Helper function for I2C write-then-read
@@ -432,8 +435,18 @@ esp_err_t mpu6050_calculate_ground_angle(mpu6050_t *dev, const mpu6050_accel_t *
         return err;
     }
     
-    // Calculate absolute ground angle: sqrt(roll^2 + pitch^2)
-    *abs_ground_angle = sqrtf(roll * roll + pitch * pitch);
+    // Calculate absolute ground angle using 3D angle formula: acos(cos(roll) × cos(pitch))
+    float roll_rad = roll * DEG_TO_RAD;
+    float pitch_rad = pitch * DEG_TO_RAD;
+    float cos_roll = cosf(roll_rad);
+    float cos_pitch = cosf(pitch_rad);
+    float cos_angle = cos_roll * cos_pitch;
+    
+    // Clamp cos_angle to valid range [-1, 1] to avoid acos domain errors
+    cos_angle = fmaxf(-1.0f, fminf(1.0f, cos_angle));
+    
+    float angle_rad = acosf(cos_angle);
+    *abs_ground_angle = angle_rad * RAD_TO_DEG;
     
     return ESP_OK;
 }
@@ -453,8 +466,18 @@ esp_err_t mpu6050_calculate_orientation(mpu6050_t *dev, const mpu6050_accel_t *a
         return err;
     }
     
-    // Calculate absolute ground angle from roll and pitch
-    orientation->abs_ground_angle = sqrtf(orientation->roll * orientation->roll + orientation->pitch * orientation->pitch);
+    // Calculate absolute ground angle using 3D angle formula: acos(cos(roll) × cos(pitch))
+    float roll_rad = orientation->roll * DEG_TO_RAD;
+    float pitch_rad = orientation->pitch * DEG_TO_RAD;
+    float cos_roll = cosf(roll_rad);
+    float cos_pitch = cosf(pitch_rad);
+    float cos_angle = cos_roll * cos_pitch;
+    
+    // Clamp cos_angle to valid range [-1, 1] to avoid acos domain errors
+    cos_angle = fmaxf(-1.0f, fminf(1.0f, cos_angle));
+    
+    float angle_rad = acosf(cos_angle);
+    orientation->abs_ground_angle = angle_rad * RAD_TO_DEG;
     
     return ESP_OK;
 }
