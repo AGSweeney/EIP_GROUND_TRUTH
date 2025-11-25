@@ -37,3 +37,6 @@ bootlog.txt
 # Temporary files
 *.tmp
 
+# Local planning and development files (not synced)
+local/
+
