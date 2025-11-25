@@ -37,11 +37,13 @@ This project implements a full-featured EtherNet/IP adapter device on the ESP32-
 
 
 - **RFC 5227 Compliant Network Configuration**: Address Conflict Detection (ACD)
-  - RFC 5227 compliant static IP assignment with deferred IP assignment
+  - RFC 5227 compliant static IP assignment (implemented in application layer)
+  - ACD probe sequence runs **before** IP assignment (deferred assignment)
   - Natural ACD state machine flow (PROBE_WAIT → PROBING → ANNOUNCE_WAIT → ANNOUNCING → ONGOING)
-  - Probe sequence completes **before** IP assignment (3 probes from `0.0.0.0` + 2-4 announcements, ~6-10 seconds)
+  - Probe sequence: 3 probes from `0.0.0.0` + 4 announcements (~6-10 seconds total)
+  - IP assigned only after ACD confirms no conflict (ACD_IP_OK callback)
   - Callback tracking mechanism prevents false positive conflict detection on timeout
-  - Configurable ACD timing parameters (probe intervals, defensive ARP intervals)
+  - Configurable ACD timing parameters (probe intervals, announcement intervals, defensive ARP intervals)
   - Active IP defense with periodic ARP probes from `0.0.0.0` (matching Rockwell PLC behavior)
   - ACD retry logic with configurable delay and max attempts
   - User LED indication (GPIO27): blinks during normal operation, solid on ACD conflict
@@ -251,7 +253,7 @@ This project includes custom modifications to the lwIP network stack for RFC 522
 
 ### Key Modifications
 
-- RFC 5227 compliant static IP assignment
+- RFC 5227 compliant static IP assignment (implemented in application layer)
 - Configurable ACD timing parameters
 - Increased socket and connection limits
 - IRAM optimization for network performance

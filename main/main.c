@@ -33,38 +33,43 @@
  *
  * Architecture:
  * ------------
- * - Static IP: Full RFC 5227 compliance
- *   * Probe phase: 3 ARP probes from 0.0.0.0 with random 1-2 second intervals
- *   * Announce phase: 2 ARP announcements after successful probe
+ * - Static IP: RFC 5227 compliant behavior (implemented in application layer)
+ *   * Probe phase: 3 ARP probes from 0.0.0.0 with configurable intervals (default: 200ms)
+ *   * Announce phase: 4 ARP announcements after successful probe (default: 2000ms intervals)
  *   * Ongoing defense: Periodic ARP probes every ~90 seconds (configurable)
- *   * Total time: ~8-10 seconds for initial IP assignment
+ *   * Total time: ~6-10 seconds for initial IP assignment
+ *   * ACD probe sequence runs BEFORE IP assignment
+ *   * IP assigned only after ACD confirms no conflict (ACD_IP_OK callback)
  *
- * - DHCP: Simplified ACD (not RFC 5227 compliant)
- *   * Single ARP probe with 500ms timeout
- *   * Fast conflict detection (~1 second)
+ * - DHCP: Simplified ACD (not fully RFC 5227 compliant)
+ *   * ACD check performed by lwIP DHCP client before accepting IP
  *   * Handled internally by lwIP DHCP client
  *
- * Implementation Details:
- * ----------------------
- * 1. Legacy Mode (LWIP_ACD_RFC5227_COMPLIANT_STATIC=0):
- *    - ACD probe sequence runs BEFORE IP assignment
- *    - IP is assigned only after ACD confirms no conflict
- *    - Uses tcpip_perform_acd() to coordinate probe sequence
+ * Implementation:
+ * --------------
+ * The ACD implementation is in the application layer (this file) and coordinates
+ * with the lwIP ACD module. The implementation follows RFC 5227 behavior:
+ * - ACD probe sequence completes before IP assignment
+ * - Uses tcpip_perform_acd() to coordinate probe sequence
+ * - IP assignment deferred until ACD_IP_OK callback received
+ * - Natural state machine flow: PROBE_WAIT → PROBING → ANNOUNCE_WAIT → ANNOUNCING → ONGOING
  *
- * 2. RFC 5227 Mode (LWIP_ACD_RFC5227_COMPLIANT_STATIC=1):
- *    - Uses lwIP's netif_set_addr_with_acd() API
- *    - IP assignment deferred until ACD completes
- *    - More robust but requires RFC 5227 support in lwIP
- *
- * 3. Retry Logic (CONFIG_OPENER_ACD_RETRY_ENABLED):
+ * Features:
+ * --------
+ * 1. Retry Logic (CONFIG_OPENER_ACD_RETRY_ENABLED):
  *    - On conflict, removes IP and schedules retry after delay
  *    - Configurable max attempts and retry delay
  *    - Prevents infinite retry loops
  *
- * 4. User LED Indication:
+ * 2. User LED Indication:
  *    - GPIO27 blinks during normal operation
  *    - Goes solid on ACD conflict detection
  *    - Visual feedback for network issues
+ *
+ * 3. Callback Tracking:
+ *    - Distinguishes between callback events and timeout conditions
+ *    - Prevents false positive conflict detection when probe sequence is still running
+ *    - IP assignment occurs in callback when ACD_IP_OK fires
  *
  * Thread Safety:
  * -------------
@@ -75,8 +80,12 @@
  * Configuration:
  * --------------
  * - CONFIG_OPENER_ACD_PROBE_NUM: Number of probes (default: 3)
- * - CONFIG_OPENER_ACD_PROBE_MIN_MS: Minimum probe interval (default: 1000ms)
- * - CONFIG_OPENER_ACD_PROBE_MAX_MS: Maximum probe interval (default: 2000ms)
+ * - CONFIG_OPENER_ACD_PROBE_WAIT_MS: Initial delay before probing (default: 200ms)
+ * - CONFIG_OPENER_ACD_PROBE_MIN_MS: Minimum delay between probes (default: 200ms)
+ * - CONFIG_OPENER_ACD_PROBE_MAX_MS: Maximum delay between probes (default: 200ms)
+ * - CONFIG_OPENER_ACD_ANNOUNCE_NUM: Number of announcements (default: 4)
+ * - CONFIG_OPENER_ACD_ANNOUNCE_INTERVAL_MS: Time between announcements (default: 2000ms)
+ * - CONFIG_OPENER_ACD_ANNOUNCE_WAIT_MS: Delay before announcing (default: 2000ms)
  * - CONFIG_OPENER_ACD_PERIODIC_DEFEND_INTERVAL_MS: Defensive ARP interval (default: 90000ms)
  * - CONFIG_OPENER_ACD_RETRY_ENABLED: Enable retry on conflict
  * - CONFIG_OPENER_ACD_RETRY_DELAY_MS: Delay before retry (default: 10000ms)
@@ -110,9 +119,6 @@
 #include "lwip/netifapi.h"
 #include "lwip/timeouts.h"
 #include "lwip/etharp.h"
-#if LWIP_ACD && LWIP_ACD_RFC5227_COMPLIANT_STATIC
-#include "lwip/netif_pending_ip.h"
-#endif
 #include "nvs_flash.h"
 #include "esp_ota_ops.h"
 #include "esp_timer.h"
@@ -313,9 +319,6 @@ static acd_callback_enum_t s_acd_last_state = ACD_IP_OK;  // Will be set by call
 static bool s_acd_callback_received = false;  // Track if callback was actually received
 static bool s_acd_probe_pending = false;
 static esp_netif_ip_info_t s_pending_static_ip_cfg = {0};
-#if LWIP_ACD_RFC5227_COMPLIANT_STATIC
-static esp_netif_t *s_pending_esp_netif = NULL;  /* Store esp_netif for callback */
-#endif
 #if CONFIG_OPENER_ACD_RETRY_ENABLED
 static TimerHandle_t s_acd_retry_timer = NULL;
 static int s_acd_retry_count = 0;
@@ -467,14 +470,6 @@ static void tcpip_acd_conflict_callback(struct netif *netif, acd_callback_enum_t
                 xTimerStop(s_acd_retry_timer, portMAX_DELAY);
             }
 #endif
-#if LWIP_ACD_RFC5227_COMPLIANT_STATIC
-            /* With RFC 5227, IP is now assigned. Configure DNS and notify */
-            if (netif != NULL && s_pending_esp_netif != NULL) {
-                opener_configure_dns(s_pending_esp_netif);
-                s_acd_probe_pending = false;
-                ESP_LOGI(TAG, "RFC 5227: IP assigned after ACD confirmation");
-            }
-#else
             /* Legacy mode: Assign IP if it hasn't been assigned yet (callback fired after timeout) */
             if (s_acd_probe_pending && netif != NULL) {
                 esp_netif_t *esp_netif = esp_netif_get_handle_from_netif_impl(netif);
@@ -485,7 +480,6 @@ static void tcpip_acd_conflict_callback(struct netif *netif, acd_callback_enum_t
                     s_acd_probe_pending = false;
                 }
             }
-#endif
             break;
         case ACD_DECLINE:
         case ACD_RESTART_CLIENT:
@@ -496,14 +490,6 @@ static void tcpip_acd_conflict_callback(struct netif *netif, acd_callback_enum_t
             user_led_stop_flash();
             user_led_set(true);  // Turn LED on solid
             ESP_LOGW(TAG, "ACD: Conflict detected (state=%d) - LED set to solid", (int)state);
-#if LWIP_ACD_RFC5227_COMPLIANT_STATIC
-            /* With RFC 5227, IP was not assigned due to conflict */
-            if (netif != NULL) {
-                s_acd_probe_pending = false;
-                s_pending_esp_netif = NULL;
-                ESP_LOGW(TAG, "RFC 5227: IP not assigned due to conflict");
-            }
-#endif
 #if CONFIG_OPENER_ACD_RETRY_ENABLED
             // Retry logic: On conflict, remove IP and schedule retry after delay
             if (netif != NULL) {
@@ -627,8 +613,7 @@ static void tcpip_acd_stop_cb(void *arg) {
     acd_stop(&s_static_ip_acd);
 }
 
-#if !LWIP_ACD_RFC5227_COMPLIANT_STATIC
-/* Legacy ACD function - only used when RFC 5227 compliant mode is disabled */
+/* Legacy ACD function */
 static bool tcpip_perform_acd(struct netif *netif, const ip4_addr_t *ip) {
     if (!g_tcpip.select_acd) {
         g_tcpip.status &= ~(kTcpipStatusAcdStatus | kTcpipStatusAcdFault);
@@ -856,29 +841,6 @@ static bool tcpip_perform_acd(struct netif *netif, const ip4_addr_t *ip) {
     // The callback will trigger IP assignment when it fires (see tcpip_acd_conflict_callback)
     return true;
 }
-#endif /* !LWIP_ACD_RFC5227_COMPLIANT_STATIC */
-
-#if LWIP_ACD_RFC5227_COMPLIANT_STATIC
-typedef struct {
-    struct netif *netif;
-    ip4_addr_t ip;
-    ip4_addr_t netmask;
-    ip4_addr_t gw;
-    err_t err;
-} Rfc5227AcdContext;
-
-static void tcpip_rfc5227_acd_start_cb(void *arg) {
-    Rfc5227AcdContext *ctx = (Rfc5227AcdContext *)arg;
-    ESP_LOGI(TAG, "tcpip_rfc5227_acd_start_cb: Starting ACD for IP " IPSTR, IP2STR(&ctx->ip));
-    ctx->err = netif_set_addr_with_acd(ctx->netif, &ctx->ip, &ctx->netmask, &ctx->gw, 
-                                        tcpip_acd_conflict_callback);
-    if (ctx->err == ERR_OK) {
-        ESP_LOGI(TAG, "netif_set_addr_with_acd() succeeded - ACD probe sequence starting");
-    } else {
-        ESP_LOGE(TAG, "netif_set_addr_with_acd() failed with err=%d", (int)ctx->err);
-    }
-}
-#endif
 
 static void tcpip_try_pending_acd(esp_netif_t *netif, struct netif *lwip_netif) {
     ESP_LOGI(TAG, "tcpip_try_pending_acd: called - probe_pending=%d, netif=%p, lwip_netif=%p", 
@@ -904,39 +866,6 @@ static void tcpip_try_pending_acd(esp_netif_t *netif, struct netif *lwip_netif) 
     }
     ESP_LOGI(TAG, "tcpip_try_pending_acd: All conditions met, starting ACD...");
 
-#if LWIP_ACD_RFC5227_COMPLIANT_STATIC
-    /* Use RFC 5227 compliant API: IP assignment deferred until ACD confirms */
-    s_pending_esp_netif = netif;  /* Store for callback */
-    Rfc5227AcdContext ctx = {
-        .netif = lwip_netif,
-        .ip.addr = s_pending_static_ip_cfg.ip.addr,
-        .netmask.addr = s_pending_static_ip_cfg.netmask.addr,
-        .gw.addr = s_pending_static_ip_cfg.gw.addr,
-        .err = ERR_OK
-    };
-    
-    CipTcpIpSetLastAcdActivity(2);
-    ESP_LOGI(TAG, "Starting RFC 5227 ACD probe for IP " IPSTR, IP2STR(&ctx.ip));
-    if (tcpip_callback_with_block(tcpip_rfc5227_acd_start_cb, &ctx, 1) != ERR_OK || ctx.err != ERR_OK) {
-        ESP_LOGE(TAG, "Failed to start RFC 5227 compliant ACD (err=%d)", (int)ctx.err);
-        CipTcpIpSetLastAcdActivity(3);
-        g_tcpip.status |= kTcpipStatusAcdStatus | kTcpipStatusAcdFault;
-        s_pending_esp_netif = NULL;
-        /* Fall back to immediate assignment */
-        ESP_ERROR_CHECK(esp_netif_set_ip_info(netif, &s_pending_static_ip_cfg));
-        opener_configure_dns(netif);
-        s_acd_probe_pending = false;
-        CipTcpIpSetLastAcdActivity(0);
-    } else {
-        ESP_LOGI(TAG, "RFC 5227: ACD started for IP " IPSTR ", probing for conflicts...", IP2STR(&ctx.ip));
-        ESP_LOGI(TAG, "ACD will send %d probes, waiting %d-%d ms between probes", 
-                 CONFIG_OPENER_ACD_PROBE_NUM,
-                 CONFIG_OPENER_ACD_PROBE_MIN_MS,
-                 CONFIG_OPENER_ACD_PROBE_MAX_MS);
-        /* IP will be assigned when ACD_IP_OK callback is received */
-        /* DNS will be configured in the callback */
-    }
-#else
     /* Legacy ACD flow: Perform ACD BEFORE setting IP (better conflict detection) */
     ESP_LOGW(TAG, "Using legacy ACD mode - ACD runs before IP assignment");
     ip4_addr_t desired_ip = { .addr = s_pending_static_ip_cfg.ip.addr };
@@ -980,7 +909,6 @@ static void tcpip_try_pending_acd(esp_netif_t *netif, struct netif *lwip_netif) 
     ESP_LOGD(TAG, "Legacy ACD: ACD is in ONGOING state (callback fired after announce phase), periodic defense active");
     
     // Cancel any pending retry timers (retry handler checks s_acd_probe_pending and skips gracefully)
-#endif
 }
 
 static void tcpip_retry_acd_deferred(void *arg) {
@@ -1118,14 +1046,6 @@ static void configure_netif_from_tcpip(esp_netif_t *netif) {
         esp_netif_dhcpc_stop(netif);
 
         if (ip_info_has_static_address(&ip_info)) {
-#if LWIP_ACD_RFC5227_COMPLIANT_STATIC
-            /* RFC 5227 mode: Don't set IP immediately if ACD is enabled */
-            if (!g_tcpip.select_acd) {
-                /* ACD disabled, set IP immediately */
-                ESP_ERROR_CHECK(esp_netif_set_ip_info(netif, &ip_info));
-            }
-            /* If ACD enabled, IP will be set via netif_set_addr_with_acd() */
-#else
             /* Legacy ACD mode: Check if ACD is enabled BEFORE setting IP */
             if (g_tcpip.select_acd) {
                 /* ACD enabled - defer IP assignment until ACD completes */
@@ -1134,8 +1054,8 @@ static void configure_netif_from_tcpip(esp_netif_t *netif) {
             } else {
                 /* ACD disabled - set IP immediately */
                 ESP_ERROR_CHECK(esp_netif_set_ip_info(netif, &ip_info));
+                opener_configure_dns(netif);
             }
-#endif
         } else {
             ESP_LOGW(TAG, "Static configuration missing IP/mask; attempting AutoIP fallback");
 #if CONFIG_LWIP_AUTOIP
@@ -1167,20 +1087,11 @@ static void configure_netif_from_tcpip(esp_netif_t *netif) {
             s_pending_static_ip_cfg = ip_info;
             s_acd_probe_pending = true;
             CipTcpIpSetLastAcdActivity(1);
-            ESP_LOGI(TAG, "ACD path: select_acd=%d, RFC5227=%d, lwip_netif=%p", 
+            ESP_LOGI(TAG, "ACD path: select_acd=%d, lwip_netif=%p", 
                      g_tcpip.select_acd ? 1 : 0,
-#if LWIP_ACD_RFC5227_COMPLIANT_STATIC
-                     1,
-#else
-                     0,
-#endif
                      (void *)lwip_netif);
             if (lwip_netif != NULL) {
-#if LWIP_ACD_RFC5227_COMPLIANT_STATIC
-                ESP_LOGI(TAG, "Using RFC 5227 compliant ACD for static IP");
-#else
                 ESP_LOGI(TAG, "Using legacy ACD for static IP");
-#endif
                 tcpip_try_pending_acd(netif, lwip_netif);
             }
         } else {
@@ -1422,12 +1333,6 @@ void app_main(void)
         g_tcpip.status &= ~(kTcpipStatusAcdStatus | kTcpipStatusAcdFault);
         NvTcpipStore(&g_tcpip);
     }
-    /* if (g_tcpip.select_acd) {
-        ESP_LOGW(TAG, "ACD selection stored in NV; disabling at boot");
-        g_tcpip.select_acd = false;
-        g_tcpip.status &= ~(kTcpipStatusAcdStatus | kTcpipStatusAcdFault);
-        NvTcpipStore(&g_tcpip);
-    } */
     if (tcpip_config_uses_dhcp()) {
         g_tcpip.interface_configuration.ip_address = 0;
         g_tcpip.interface_configuration.network_mask = 0;
@@ -1535,16 +1440,26 @@ static void scan_i2c_bus(i2c_master_bus_handle_t bus_handle)
         const char* device_name = "Unknown device";
         
         switch (addr) {
+            case 0x18:
+                device_name = "ES8311 (Audio Codec)";
+                break;
             case 0x29: 
                 device_name = "Unknown device";
                 break;
             case 0x2A: 
+                device_name = "Unknown device";
                 break;
             case 0x68: 
                 device_name = "MPU6050 (IMU) - AD0 LOW";
                 break;
             case 0x69: 
                 device_name = "MPU6050 (IMU) - AD0 HIGH";
+                break;
+            case 0x6A:
+                device_name = "LSM6DS3 (IMU) - SA0 LOW";
+                break;
+            case 0x6B:
+                device_name = "LSM6DS3 (IMU) - SA0 HIGH";
                 break;
             default:
                 device_name = "Unknown device";
@@ -1558,14 +1473,17 @@ static void scan_i2c_bus(i2c_master_bus_handle_t bus_handle)
     
     // Additional info for known devices
     bool has_mpu6050 = false;
+    bool has_lsm6ds3 = false;
     
     for (int i = 0; i < found_count; i++) {
         uint8_t addr = found_addresses[i];
         if (addr == 0x68 || addr == 0x69) has_mpu6050 = true;
+        if (addr == 0x6A || addr == 0x6B) has_lsm6ds3 = true;
     }
     
     ESP_LOGI(TAG, "Device summary:");
     if (has_mpu6050) ESP_LOGI(TAG, "  ✓ MPU6050 IMU detected");
+    if (has_lsm6ds3) ESP_LOGI(TAG, "  ✓ LSM6DS3 IMU detected");
 }
 
 // User LED control functions
@@ -2249,10 +2167,10 @@ static void imu_io_task(void *pvParameters)
             if (sizeof(g_assembly_data096) >= 32) {
                 // Read cylinder bore from byte 29 (scaled by 100: 0 = use NVS, 1-255 = 0.01-2.55 inches)
                 uint8_t cylinder_bore_byte = g_assembly_data096[29];
-                if (cylinder_bore_byte > 0 && cylinder_bore_byte <= 255) {
+                if (cylinder_bore_byte > 0) {
                     cylinder_bore_inches = (float)cylinder_bore_byte / 100.0f;  // Convert from scaled (1-255) to inches (0.01-2.55)
                 } else {
-                    // Fall back to NVS if byte is 0 or out of range
+                    // Fall back to NVS if byte is 0
                     cylinder_bore_inches = system_cylinder_bore_load();
                 }
                 
