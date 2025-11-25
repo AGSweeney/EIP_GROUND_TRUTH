@@ -170,7 +170,7 @@ bool webui_init(void)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 30; // Simplified web UI - only device config, OTA, and API endpoints
+    config.max_uri_handlers = 35; // Increased to accommodate all API endpoints (currently 34 handlers: 4 HTML + 30 API)
     config.max_open_sockets = 7;
     config.stack_size = 20480; // Increased to 20KB for large HTML pages and file uploads
     config.task_priority = 5;

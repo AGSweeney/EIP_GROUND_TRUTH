@@ -14,12 +14,11 @@ This project implements a full-featured EtherNet/IP adapter device on the ESP32-
   - Configuration Assembly 151 (10 bytes)
   - Support for Exclusive Owner, Input Only, and Listen Only connections
 
-- **MPU6050 IMU Integration**: 6-axis motion sensor support
+- **IMU Integration**: 6-axis motion sensor support (MPU6050 primary, LSM6DS3 fallback)
   - Sensor fusion (complementary filter) for accurate orientation
-  - Fused angle from vertical calculation
+  - Roll, pitch, and ground angle from vertical calculation
   - Cylinder pressure calculations for opposed cylinders
-  - Temperature monitoring
-  - Data mapped to Input Assembly 100 as DINTs
+  - Data mapped to Input Assembly 100 as 5 DINTs (20 bytes, configurable byte offset)
 
 - **Modbus TCP Server**: Standard Modbus TCP/IP server (port 502)
   - Input Registers 0-15 map to Input Assembly 100
@@ -175,17 +174,19 @@ Configuration via web API:
 The device exposes three assembly instances:
 
 - **Assembly 100 (Input)**: 32 bytes of input data
-  - MPU6050 sensor data (16 bytes: 4 DINTs)
-    - DINT 0: Fused angle (degrees * 100)
-    - DINT 1: Cylinder 1 pressure (PSI * 10)
-    - DINT 2: Cylinder 2 pressure (PSI * 10)
-    - DINT 3: Temperature (Celsius * 100)
-  - Available space for other sensor data (bytes 16-31)
+  - IMU sensor data (20 bytes: 5 DINTs, configurable byte offset)
+    - DINT 0: Roll angle (degrees * 10000)
+    - DINT 1: Pitch angle (degrees * 10000)
+    - DINT 2: Ground angle from vertical (degrees * 10000)
+    - DINT 3: Bottom cylinder pressure (PSI * 1000)
+    - DINT 4: Top cylinder pressure (PSI * 1000)
+  - Available space for other sensor data (remaining bytes)
 
 - **Assembly 150 (Output)**: 32 bytes of output data
-  - Tool weight (byte 30)
-  - Tip force (byte 31)
-  - Control commands and other output data (bytes 0-29)
+  - Cylinder bore diameter (byte 29, scaled by 100: 0.01-2.55 inches)
+  - Tool weight (byte 30, 0-255 lbs)
+  - Tip force (byte 31, 0-255 lbs)
+  - Control commands and other output data (bytes 0-28)
 
 - **Assembly 151 (Configuration)**: 10 bytes for configuration
 
@@ -203,7 +204,7 @@ Access the web interface at `http://<device-ip>/` after the device has obtained 
 ### Features
 
 - **Network Configuration**: Set IP address, netmask, gateway, DNS
-- **Sensor Status**: Real-time MPU6050 readings and configuration
+- **Sensor Status**: Real-time IMU sensor readings and configuration (MPU6050 or LSM6DS3)
 - **Assembly Monitoring**: View Input/Output assembly data with bit-level visualization
 - **Modbus TCP**: Enable/disable Modbus TCP server
 - **OTA Updates**: Upload firmware updates via web browser

@@ -126,6 +126,9 @@
 #include "ota_manager.h"
 #include "system_config.h"
 #include "mpu6050.h"
+#include "lsm6ds3.h"
+#include "lsm6ds3_fusion.h"
+#include "lsm6ds3_reg.h"
 #include "driver/i2c_master.h"
 #include "log_buffer.h"
 
@@ -145,19 +148,32 @@ static struct netif *s_netif = NULL;
 static SemaphoreHandle_t s_netif_mutex = NULL;
 static bool s_services_initialized = false;
 
+// IMU sensor type enumeration
+typedef enum {
+    IMU_TYPE_NONE = 0,
+    IMU_TYPE_MPU6050 = 1,
+    IMU_TYPE_LSM6DS3 = 2
+} imu_type_t;
+
 // MPU6050 device instance
 static mpu6050_t s_mpu6050 = {0};
 static i2c_master_dev_handle_t s_mpu6050_dev_handle = NULL;
 static bool s_mpu6050_initialized = false;
-static bool s_mpu6050_enabled_cached = false;  // Cache enabled state to avoid repeated NVS reads
 
+// LSM6DS3 device instance
+static lsm6ds3_handle_t s_lsm6ds3_handle = {0};
+static lsm6ds3_complementary_filter_t s_lsm6ds3_filter = {0};
+static bool s_lsm6ds3_initialized = false;
 
-// Sensor fusion state for absolute angle from vertical
-static float s_fused_angle_from_vertical_rad = 0.0f;  // Fused angle estimate in radians
-static int64_t s_last_fusion_time_us = 0;  // Last fusion update timestamp
+// Unified IMU state
+static imu_type_t s_active_imu_type = IMU_TYPE_NONE;
+static bool s_imu_enabled_cached = false;  // Cache enabled state to avoid repeated NVS reads
+static SemaphoreHandle_t s_imu_state_mutex = NULL;  // Protects IMU state variables
 
-static TaskHandle_t s_mpu6050_test_task_handle = NULL;
-static TaskHandle_t s_mpu6050_io_task_handle = NULL;
+// Sensor fusion state for absolute angle from vertical (removed - not currently used)
+
+static TaskHandle_t s_imu_test_task_handle = NULL;
+static TaskHandle_t s_imu_io_task_handle = NULL;
 
 // I2C bus handle (initialized in app_main)
 static i2c_master_bus_handle_t s_i2c_bus_handle = NULL;
@@ -168,14 +184,125 @@ static bool s_user_led_initialized = false;
 static bool s_user_led_flash_enabled = false;
 static TaskHandle_t s_user_led_task_handle = NULL;
 
-// Function to update MPU6050 enabled cache (called from API)
-void sample_application_set_mpu6050_enabled(bool enabled)
+// Initialize IMU state mutex (called once during initialization)
+static void imu_state_mutex_init(void)
 {
-    s_mpu6050_enabled_cached = enabled;
+    if (s_imu_state_mutex == NULL) {
+        s_imu_state_mutex = xSemaphoreCreateMutex();
+        if (s_imu_state_mutex == NULL) {
+            ESP_LOGE(TAG, "Failed to create IMU state mutex");
+        }
+    }
 }
 
-static void mpu6050_test_task(void *pvParameters);
-static void mpu6050_io_task(void *pvParameters);
+// Function to update IMU enabled cache (called from API)
+void sample_application_set_mpu6050_enabled(bool enabled)
+{
+    if (s_imu_state_mutex == NULL) {
+        imu_state_mutex_init();
+    }
+    if (s_imu_state_mutex != NULL && xSemaphoreTake(s_imu_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        s_imu_enabled_cached = enabled;
+        xSemaphoreGive(s_imu_state_mutex);
+    } else {
+        // Fallback: set without mutex if mutex unavailable (shouldn't happen)
+        s_imu_enabled_cached = enabled;
+    }
+}
+
+// Function to update IMU enabled cache for LSM6DS3 (called from API)
+void sample_application_set_lsm6ds3_enabled(bool enabled)
+{
+    if (s_imu_state_mutex == NULL) {
+        imu_state_mutex_init();
+    }
+    if (s_imu_state_mutex != NULL && xSemaphoreTake(s_imu_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        s_imu_enabled_cached = enabled;
+        xSemaphoreGive(s_imu_state_mutex);
+    } else {
+        // Fallback: set without mutex if mutex unavailable (shouldn't happen)
+        s_imu_enabled_cached = enabled;
+    }
+}
+
+// Function to trigger LSM6DS3 calibration (called from API)
+// Returns ESP_OK on success, ESP_FAIL if sensor not initialized
+esp_err_t sample_application_calibrate_lsm6ds3(uint32_t samples, uint32_t sample_delay_ms)
+{
+    if (s_imu_state_mutex == NULL) {
+        imu_state_mutex_init();
+    }
+    
+    // Check initialization status with mutex protection
+    bool is_initialized = false;
+    if (s_imu_state_mutex != NULL && xSemaphoreTake(s_imu_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        is_initialized = s_lsm6ds3_initialized;
+        xSemaphoreGive(s_imu_state_mutex);
+    } else {
+        // Fallback: check without mutex
+        is_initialized = s_lsm6ds3_initialized;
+    }
+    
+    if (!is_initialized) {
+        return ESP_FAIL;
+    }
+    
+    // Perform calibration with mutex protection
+    esp_err_t err = ESP_FAIL;
+    if (s_imu_state_mutex != NULL && xSemaphoreTake(s_imu_state_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        if (s_lsm6ds3_initialized && s_i2c_bus_handle != NULL) {
+            err = lsm6ds3_calibrate_gyro(&s_lsm6ds3_handle, samples, sample_delay_ms);
+            if (err == ESP_OK) {
+                // Save calibration to NVS
+                esp_err_t save_err = lsm6ds3_save_calibration_to_nvs(&s_lsm6ds3_handle, "system");
+                if (save_err != ESP_OK) {
+                    ESP_LOGW(TAG, "LSM6DS3: Calibration complete but failed to save to NVS: %s", esp_err_to_name(save_err));
+                }
+            }
+        }
+        xSemaphoreGive(s_imu_state_mutex);
+    }
+    
+    return err;
+}
+
+// Function to get LSM6DS3 calibration status (called from API)
+bool sample_application_get_lsm6ds3_calibration_status(float *gyro_offset_mdps)
+{
+    if (s_imu_state_mutex == NULL) {
+        imu_state_mutex_init();
+    }
+    
+    bool calibrated = false;
+    if (s_imu_state_mutex != NULL && xSemaphoreTake(s_imu_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (s_lsm6ds3_initialized) {
+            calibrated = s_lsm6ds3_handle.calibration.gyro_calibrated;
+            if (gyro_offset_mdps != NULL) {
+                gyro_offset_mdps[0] = s_lsm6ds3_handle.calibration.gyro_offset_mdps[0];
+                gyro_offset_mdps[1] = s_lsm6ds3_handle.calibration.gyro_offset_mdps[1];
+                gyro_offset_mdps[2] = s_lsm6ds3_handle.calibration.gyro_offset_mdps[2];
+            }
+        }
+        xSemaphoreGive(s_imu_state_mutex);
+    } else {
+        // Fallback: read without mutex
+        if (s_lsm6ds3_initialized) {
+            calibrated = s_lsm6ds3_handle.calibration.gyro_calibrated;
+            if (gyro_offset_mdps != NULL) {
+                gyro_offset_mdps[0] = s_lsm6ds3_handle.calibration.gyro_offset_mdps[0];
+                gyro_offset_mdps[1] = s_lsm6ds3_handle.calibration.gyro_offset_mdps[1];
+                gyro_offset_mdps[2] = s_lsm6ds3_handle.calibration.gyro_offset_mdps[2];
+            }
+        }
+    }
+    
+    return calibrated;
+}
+
+static void imu_test_task(void *pvParameters);
+static void imu_io_task(void *pvParameters);
+static bool try_init_mpu6050(i2c_master_bus_handle_t bus_handle);
+static bool try_init_lsm6ds3(i2c_master_bus_handle_t bus_handle);
 static void scan_i2c_bus(i2c_master_bus_handle_t bus_handle);
 #if LWIP_IPV4 && LWIP_ACD
 static struct acd s_static_ip_acd;
@@ -817,7 +944,7 @@ static void tcpip_try_pending_acd(esp_netif_t *netif, struct netif *lwip_netif) 
     ESP_LOGD(TAG, "Legacy ACD: Starting probe sequence for IP " IPSTR " BEFORE IP assignment", IP2STR(&desired_ip));
     
     // Run ACD BEFORE assigning IP to ensure conflicts are detected first
-    bool acd_result = tcpip_perform_acd(lwip_netif, &desired_ip);
+    (void)tcpip_perform_acd(lwip_netif, &desired_ip);
     
     // Check if callback was received and indicates conflict
     if (s_acd_callback_received && (s_acd_last_state == ACD_DECLINE || s_acd_last_state == ACD_RESTART_CLIENT)) {
@@ -1198,23 +1325,24 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
                 ESP_LOGW(TAG, "I2C bus not available for scanning");
             }
             
-            // Start MPU6050 test task (always try to initialize if I2C bus is available)
-            if (s_mpu6050_test_task_handle == NULL) {
+            // Start IMU test task (always try to initialize if I2C bus is available)
+            // Will try MPU6050 first, then fall back to LSM6DS3 if MPU6050 not detected
+            if (s_imu_test_task_handle == NULL) {
                 if (s_i2c_bus_handle != NULL) {
-                    BaseType_t result = xTaskCreatePinnedToCore(mpu6050_test_task,
-                                                               "MPU6050_TEST",
+                    BaseType_t result = xTaskCreatePinnedToCore(imu_test_task,
+                                                               "IMU_TEST",
                                                                4096,  // Stack size
                                                                NULL,
                                                                4,     // Priority (lower than MCP I/O)
-                                                               &s_mpu6050_test_task_handle,
+                                                               &s_imu_test_task_handle,
                                                                1);    // Core 1
                     if (result == pdPASS) {
-                        ESP_LOGI(TAG, "MPU6050 test task started on Core 1");
+                        ESP_LOGI(TAG, "IMU test task started on Core 1");
                     } else {
-                        ESP_LOGW(TAG, "Failed to create MPU6050 test task");
+                        ESP_LOGW(TAG, "Failed to create IMU test task");
                     }
                 } else {
-                    ESP_LOGI(TAG, "MPU6050 test task skipped - I2C bus not available");
+                    ESP_LOGI(TAG, "IMU test task skipped - I2C bus not available");
                 }
             }
             
@@ -1521,32 +1649,9 @@ static void user_led_stop_flash(void) {
     }
 }
 
-// Task to test MPU6050 sensor - initializes, verifies connection, and logs readings
-static void mpu6050_test_task(void *pvParameters)
+// Helper function to try initializing MPU6050
+static bool try_init_mpu6050(i2c_master_bus_handle_t bus_handle)
 {
-    (void)pvParameters;
-    
-    ESP_LOGI(TAG, "MPU6050 test task started");
-    
-    // Wait for I2C bus to be ready
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    
-    // Wait for I2C bus to be initialized
-    int retry_count = 0;
-    while (s_i2c_bus_handle == NULL && retry_count < 10) {
-        ESP_LOGW(TAG, "MPU6050: I2C bus handle not available, retrying... (%d/10)", retry_count + 1);
-        vTaskDelay(pdMS_TO_TICKS(500));
-        retry_count++;
-    }
-    
-    if (s_i2c_bus_handle == NULL) {
-        ESP_LOGE(TAG, "MPU6050: I2C bus handle is NULL after retries, cannot initialize");
-        vTaskDelete(NULL);
-        return;
-    }
-    
-    i2c_master_bus_handle_t bus_handle = s_i2c_bus_handle;
-    
     // Try both I2C addresses (0x68 and 0x69) - AD0 pin can be LOW or HIGH
     uint8_t mpu6050_addr = MPU6050_I2C_ADDR_PRIMARY;  // Start with 0x68
     bool device_found = false;
@@ -1565,11 +1670,9 @@ static void mpu6050_test_task(void *pvParameters)
     }
     
     if (!device_found) {
-        ESP_LOGW(TAG, "MPU6050: Device not detected at either address (0x%02X or 0x%02X)", 
+        ESP_LOGI(TAG, "MPU6050: Device not detected at either address (0x%02X or 0x%02X)", 
                  MPU6050_I2C_ADDR_PRIMARY, MPU6050_I2C_ADDR_SECONDARY);
-        ESP_LOGI(TAG, "MPU6050: Task will exit - device not present or I2C bus issue");
-        vTaskDelete(NULL);
-        return;
+        return false;
     }
     
     // Configure I2C device for MPU6050
@@ -1582,8 +1685,7 @@ static void mpu6050_test_task(void *pvParameters)
     esp_err_t err = i2c_master_bus_add_device(bus_handle, &dev_cfg, &s_mpu6050_dev_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "MPU6050: Failed to add I2C device: %s", esp_err_to_name(err));
-        vTaskDelete(NULL);
-        return;
+        return false;
     }
     
     vTaskDelay(pdMS_TO_TICKS(200));  // Give I2C bus a moment to stabilize after adding device
@@ -1592,8 +1694,8 @@ static void mpu6050_test_task(void *pvParameters)
     if (!mpu6050_init(&s_mpu6050, s_mpu6050_dev_handle)) {
         ESP_LOGE(TAG, "MPU6050: Failed to initialize device structure");
         i2c_master_bus_rm_device(s_mpu6050_dev_handle);
-        vTaskDelete(NULL);
-        return;
+        s_mpu6050_dev_handle = NULL;
+        return false;
     }
     
     // Read WHO_AM_I register to verify connection with retries
@@ -1601,7 +1703,7 @@ static void mpu6050_test_task(void *pvParameters)
     bool who_am_i_success = false;
     esp_err_t last_err = ESP_OK;
     
-    for (int retry = 0; retry < 10; retry++) {  // Increased retries to 10
+    for (int retry = 0; retry < 10; retry++) {
         err = mpu6050_read_who_am_i(&s_mpu6050, &who_am_i);
         last_err = err;
         
@@ -1613,11 +1715,9 @@ static void mpu6050_test_task(void *pvParameters)
         // Retry on timeout, invalid state, or any I2C error
         if (err == ESP_ERR_TIMEOUT || err == ESP_ERR_INVALID_STATE || 
             err == ESP_ERR_INVALID_RESPONSE || err == ESP_FAIL) {
-            // Exponential backoff: 200ms, 400ms, 600ms, etc.
             int delay_ms = 200 * (retry + 1);
             vTaskDelay(pdMS_TO_TICKS(delay_ms));
         } else {
-            // Unexpected error, don't retry
             ESP_LOGE(TAG, "MPU6050: Unexpected error type, not retrying: %s", esp_err_to_name(err));
             break;
         }
@@ -1626,20 +1726,16 @@ static void mpu6050_test_task(void *pvParameters)
     if (!who_am_i_success) {
         ESP_LOGE(TAG, "MPU6050: Failed to read WHO_AM_I after %d attempts. Last error: %s", 
                  10, esp_err_to_name(last_err));
-        ESP_LOGI(TAG, "MPU6050: This may indicate I2C bus contention or device not responding");
         i2c_master_bus_rm_device(s_mpu6050_dev_handle);
-        vTaskDelete(NULL);
-        return;
+        s_mpu6050_dev_handle = NULL;
+        return false;
     }
     
     if (who_am_i == MPU6050_WHO_AM_I_VALUE) {
-        // Standard MPU6050 chip (0x68)
         ESP_LOGI(TAG, "MPU6050: Standard chip detected (WHO_AM_I: 0x%02X)", who_am_i);
     } else if (who_am_i == 0x98) {
-        // Chinese clone chip (0x98)
         ESP_LOGI(TAG, "MPU6050: Clone chip detected (WHO_AM_I: 0x%02X) - continuing with initialization", who_am_i);
     } else {
-        // Unknown/unexpected value
         ESP_LOGW(TAG, "MPU6050: Unexpected WHO_AM_I value: 0x%02X (expected 0x%02X or 0x98 for clone)", 
                  who_am_i, MPU6050_WHO_AM_I_VALUE);
     }
@@ -1663,24 +1759,271 @@ static void mpu6050_test_task(void *pvParameters)
         ESP_LOGW(TAG, "MPU6050: Default configuration failed: %s (continuing anyway)", esp_err_to_name(err));
     }
     
-    
     s_mpu6050_initialized = true;
+    s_active_imu_type = IMU_TYPE_MPU6050;
+    ESP_LOGI(TAG, "MPU6050: Successfully initialized");
+    return true;
+}
+
+// Helper function to try initializing LSM6DS3
+static bool try_init_lsm6ds3(i2c_master_bus_handle_t bus_handle)
+{
+    // Try both I2C addresses (0x6A and 0x6B) - SA0 pin can be LOW or HIGH
+    uint8_t lsm6ds3_addr = 0x6A;  // Default address (SA0 LOW)
+    bool device_found = false;
     
-    // Load enabled state and start I/O task (task will check enabled state)
-    s_mpu6050_enabled_cached = system_mpu6050_enabled_load();
+    esp_err_t probe_err = i2c_master_probe(bus_handle, 0x6A, 1000);
+    if (probe_err == ESP_OK) {
+        lsm6ds3_addr = 0x6A;
+        device_found = true;
+    } else {
+        // Try secondary address
+        probe_err = i2c_master_probe(bus_handle, 0x6B, 1000);
+        if (probe_err == ESP_OK) {
+            lsm6ds3_addr = 0x6B;
+            device_found = true;
+        }
+    }
+    
+    if (!device_found) {
+        ESP_LOGI(TAG, "LSM6DS3: Device not detected at either address (0x6A or 0x6B)");
+        return false;
+    }
+    
+    // Configure LSM6DS3
+    lsm6ds3_config_t config = {
+        .interface = LSM6DS3_INTERFACE_I2C,
+        .bus.i2c.bus_handle = bus_handle,
+        .bus.i2c.address = lsm6ds3_addr,
+    };
+    
+    esp_err_t err = lsm6ds3_init(&s_lsm6ds3_handle, &config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "LSM6DS3: Failed to initialize: %s", esp_err_to_name(err));
+        return false;
+    }
+    
+    // Verify device ID
+    uint8_t device_id = 0;
+    err = lsm6ds3_get_device_id(&s_lsm6ds3_handle, &device_id);
+    if (err != ESP_OK || device_id != LSM6DS3_ID) {
+        ESP_LOGE(TAG, "LSM6DS3: Invalid device ID: 0x%02X (expected 0x%02X)", device_id, LSM6DS3_ID);
+        lsm6ds3_deinit(&s_lsm6ds3_handle);
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "LSM6DS3: Device detected (ID: 0x%02X)", device_id);
+    
+    // Reset sensor to ensure clean state
+    ESP_LOGI(TAG, "LSM6DS3: Resetting sensor...");
+    err = lsm6ds3_reset(&s_lsm6ds3_handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "LSM6DS3: Failed to reset sensor: %s (continuing anyway)", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "LSM6DS3: Sensor reset complete");
+        vTaskDelay(pdMS_TO_TICKS(50));  // Wait for reset to complete
+    }
+    
+    // Configure sensor settings
+    err = lsm6ds3_set_accel_odr(&s_lsm6ds3_handle, LSM6DS3_XL_ODR_104Hz);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "LSM6DS3: Failed to set accelerometer ODR: %s (continuing anyway)", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "LSM6DS3: Accelerometer ODR set to 104Hz");
+    }
+    
+    err = lsm6ds3_set_accel_full_scale(&s_lsm6ds3_handle, LSM6DS3_2g);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "LSM6DS3: Failed to set accelerometer full scale: %s (continuing anyway)", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "LSM6DS3: Accelerometer full scale set to ±2g");
+    }
+    
+    err = lsm6ds3_set_gyro_odr(&s_lsm6ds3_handle, LSM6DS3_GY_ODR_104Hz);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "LSM6DS3: Failed to set gyroscope ODR: %s (continuing anyway)", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "LSM6DS3: Gyroscope ODR set to 104Hz");
+    }
+    
+    err = lsm6ds3_set_gyro_full_scale(&s_lsm6ds3_handle, LSM6DS3_2000dps);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "LSM6DS3: Failed to set gyroscope full scale: %s (continuing anyway)", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "LSM6DS3: Gyroscope full scale set to ±2000dps");
+    }
+    
+    // Try disabling BDU first - it may be causing issues with continuous reads
+    // BDU locks registers until all bytes are read, which can cause problems if we read too fast
+    err = lsm6ds3_enable_block_data_update(&s_lsm6ds3_handle, false);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "LSM6DS3: Failed to disable BDU: %s (continuing anyway)", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "LSM6DS3: Block Data Update disabled (continuous mode)");
+    }
+    
+    // Wait for sensor to stabilize after configuration
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    // Debug: Read back CTRL1_XL as raw byte to verify configuration
+    uint8_t ctrl1_xl_raw = 0;
+    if (s_lsm6ds3_handle.ctx.read_reg(s_lsm6ds3_handle.ctx.handle, 0x10, &ctrl1_xl_raw, 1) == 0) {
+        ESP_LOGI(TAG, "LSM6DS3: CTRL1_XL raw=0x%02X (bits 7-4=ODR, bits 3-2=FS)", ctrl1_xl_raw);
+        lsm6ds3_odr_xl_t odr_readback = (lsm6ds3_odr_xl_t)((ctrl1_xl_raw & 0xF0) >> 4);
+        lsm6ds3_fs_xl_t fs_readback = (lsm6ds3_fs_xl_t)((ctrl1_xl_raw & 0x0C) >> 2);
+        ESP_LOGI(TAG, "LSM6DS3: CTRL1_XL parsed - ODR=%d (expected 4=104Hz), FS=%d (expected 0=±2g)", 
+                 odr_readback, fs_readback);
+    }
+    
+    // Debug: Read CTRL3_C to check for any blocking conditions
+    uint8_t ctrl3_c_raw = 0;
+    if (s_lsm6ds3_handle.ctx.read_reg(s_lsm6ds3_handle.ctx.handle, 0x12, &ctrl3_c_raw, 1) == 0) {
+        ESP_LOGI(TAG, "LSM6DS3: CTRL3_C raw=0x%02X", ctrl3_c_raw);
+    }
+    
+    // Debug: Try reading a single accelerometer register to verify read path
+    uint8_t outx_l_xl_raw = 0;
+    if (s_lsm6ds3_handle.ctx.read_reg(s_lsm6ds3_handle.ctx.handle, 0x28, &outx_l_xl_raw, 1) == 0) {
+        ESP_LOGI(TAG, "LSM6DS3: OUTX_L_XL (single byte) raw=0x%02X", outx_l_xl_raw);
+    }
+    
+    // Debug: Check STATUS_REG to see if data is available
+    lsm6ds3_status_reg_t status;
+    if (lsm6ds3_status_reg_get(&s_lsm6ds3_handle.ctx, &status) == 0) {
+        ESP_LOGI(TAG, "LSM6DS3: STATUS_REG - XLDA=%d GDA=%d TDA=%d", 
+                 status.xlda, status.gda, status.tda);
+    } else {
+        ESP_LOGW(TAG, "LSM6DS3: Failed to read STATUS_REG");
+    }
+    
+    // Try to load calibration from NVS first
+    esp_err_t cal_load_err = lsm6ds3_load_calibration_from_nvs(&s_lsm6ds3_handle, "system");
+    if (cal_load_err == ESP_OK && s_lsm6ds3_handle.calibration.gyro_calibrated) {
+        ESP_LOGI(TAG, "LSM6DS3: Loaded gyroscope calibration from NVS");
+    } else {
+        // No calibration found in NVS, perform calibration
+        // Calibrate gyroscope (device must be stationary during calibration)
+        // This removes bias/drift that would cause angle accumulation errors
+        ESP_LOGI(TAG, "LSM6DS3: Calibrating gyroscope (keep device still for 2 seconds)...");
+        vTaskDelay(pdMS_TO_TICKS(500));  // Wait for sensor to stabilize
+        err = lsm6ds3_calibrate_gyro(&s_lsm6ds3_handle, 100, 20);  // 100 samples at 20ms = 2 seconds
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "LSM6DS3: Failed to calibrate gyroscope: %s (continuing anyway)", esp_err_to_name(err));
+        } else {
+            ESP_LOGI(TAG, "LSM6DS3: Gyroscope calibration complete");
+            // Save calibration to NVS for next boot
+            esp_err_t cal_save_err = lsm6ds3_save_calibration_to_nvs(&s_lsm6ds3_handle, "system");
+            if (cal_save_err != ESP_OK) {
+                ESP_LOGW(TAG, "LSM6DS3: Failed to save calibration to NVS: %s", esp_err_to_name(cal_save_err));
+            }
+        }
+    }
+    
+    // Initialize complementary filter for sensor fusion
+    err = lsm6ds3_complementary_init(&s_lsm6ds3_filter, 0.96f, 104.0f);  // alpha=0.96, sample_rate=104Hz
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "LSM6DS3: Failed to initialize complementary filter: %s (continuing anyway)", esp_err_to_name(err));
+    }
+    
+    s_lsm6ds3_initialized = true;
+    s_active_imu_type = IMU_TYPE_LSM6DS3;
+    ESP_LOGI(TAG, "LSM6DS3: Successfully initialized");
+    return true;
+}
+
+// Task to test IMU sensor - tries MPU6050 first, then falls back to LSM6DS3
+static void imu_test_task(void *pvParameters)
+{
+    (void)pvParameters;
+    
+    ESP_LOGI(TAG, "IMU test task started - will try MPU6050 first, then LSM6DS3");
+    
+    // Initialize IMU state mutex
+    imu_state_mutex_init();
+    
+    // Wait for I2C bus to be ready
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    
+    // Wait for I2C bus to be initialized
+    int retry_count = 0;
+    while (s_i2c_bus_handle == NULL && retry_count < 10) {
+        ESP_LOGW(TAG, "IMU: I2C bus handle not available, retrying... (%d/10)", retry_count + 1);
+        vTaskDelay(pdMS_TO_TICKS(500));
+        retry_count++;
+    }
+    
+    if (s_i2c_bus_handle == NULL) {
+        ESP_LOGE(TAG, "IMU: I2C bus handle is NULL after retries, cannot initialize");
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    i2c_master_bus_handle_t bus_handle = s_i2c_bus_handle;
+    
+    // Initialize IMU with mutex protection
+    if (s_imu_state_mutex != NULL && xSemaphoreTake(s_imu_state_mutex, portMAX_DELAY) == pdTRUE) {
+        // Try MPU6050 first
+        ESP_LOGI(TAG, "IMU: Attempting to initialize MPU6050...");
+        if (try_init_mpu6050(bus_handle)) {
+            ESP_LOGI(TAG, "IMU: MPU6050 initialized successfully");
+            s_active_imu_type = IMU_TYPE_MPU6050;
+            // Load MPU6050 enabled state
+            s_imu_enabled_cached = system_mpu6050_enabled_load();
+        } else {
+            // MPU6050 not found, try LSM6DS3
+            ESP_LOGI(TAG, "IMU: MPU6050 not detected, trying LSM6DS3...");
+            if (try_init_lsm6ds3(bus_handle)) {
+                ESP_LOGI(TAG, "IMU: LSM6DS3 initialized successfully");
+                s_active_imu_type = IMU_TYPE_LSM6DS3;
+                // Load LSM6DS3 enabled state
+                s_imu_enabled_cached = system_lsm6ds3_enabled_load();
+            } else {
+                ESP_LOGW(TAG, "IMU: Neither MPU6050 nor LSM6DS3 detected - no IMU available");
+                s_active_imu_type = IMU_TYPE_NONE;
+                xSemaphoreGive(s_imu_state_mutex);
+                vTaskDelete(NULL);
+                return;
+            }
+        }
+        xSemaphoreGive(s_imu_state_mutex);
+    } else {
+        // Fallback: initialize without mutex (shouldn't happen)
+        ESP_LOGW(TAG, "IMU: Mutex unavailable, initializing without protection");
+        // Try MPU6050 first
+        ESP_LOGI(TAG, "IMU: Attempting to initialize MPU6050...");
+        if (try_init_mpu6050(bus_handle)) {
+            ESP_LOGI(TAG, "IMU: MPU6050 initialized successfully");
+            s_active_imu_type = IMU_TYPE_MPU6050;
+            s_imu_enabled_cached = system_mpu6050_enabled_load();
+        } else {
+            // MPU6050 not found, try LSM6DS3
+            ESP_LOGI(TAG, "IMU: MPU6050 not detected, trying LSM6DS3...");
+            if (try_init_lsm6ds3(bus_handle)) {
+                ESP_LOGI(TAG, "IMU: LSM6DS3 initialized successfully");
+                s_active_imu_type = IMU_TYPE_LSM6DS3;
+                s_imu_enabled_cached = system_lsm6ds3_enabled_load();
+            } else {
+                ESP_LOGW(TAG, "IMU: Neither MPU6050 nor LSM6DS3 detected - no IMU available");
+                s_active_imu_type = IMU_TYPE_NONE;
+                vTaskDelete(NULL);
+                return;
+            }
+        }
+    }
     
     // Always start I/O task if device is initialized (task checks enabled state)
-    if (s_mpu6050_io_task_handle == NULL) {
-        BaseType_t result = xTaskCreatePinnedToCore(mpu6050_io_task,
-                                                   "MPU6050_IO",
+    if (s_imu_io_task_handle == NULL) {
+        BaseType_t result = xTaskCreatePinnedToCore(imu_io_task,
+                                                   "IMU_IO",
                                                    4096,  // Stack size
                                                    NULL,
                                                    5,     // Priority (same as MCP I/O)
-                                                   &s_mpu6050_io_task_handle,
+                                                   &s_imu_io_task_handle,
                                                    1);    // Core 1
         if (result == pdPASS) {
+            // IMU I/O task started silently
         } else {
-            ESP_LOGW(TAG, "Failed to create MPU6050 I/O task");
+            ESP_LOGW(TAG, "Failed to create IMU I/O task");
         }
     }
     
@@ -1689,47 +2032,83 @@ static void mpu6050_test_task(void *pvParameters)
 }
 
 
-// Task to continuously read MPU6050 sensor data and write to Input Assembly 100
-static void mpu6050_io_task(void *pvParameters)
+// Task to continuously read IMU sensor data and write to Input Assembly 100
+// Works with both MPU6050 and LSM6DS3 sensors
+static void imu_io_task(void *pvParameters)
 {
     (void)pvParameters;
     
-    // Wait for initialization to complete
-    while (!s_mpu6050_initialized) {
+    // Wait for initialization to complete (either MPU6050 or LSM6DS3)
+    // Check with mutex protection
+    imu_type_t active_type = IMU_TYPE_NONE;
+    if (s_imu_state_mutex != NULL && xSemaphoreTake(s_imu_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        active_type = s_active_imu_type;
+        xSemaphoreGive(s_imu_state_mutex);
+    }
+    
+    while (active_type == IMU_TYPE_NONE) {
         vTaskDelay(pdMS_TO_TICKS(100));
+        if (s_imu_state_mutex != NULL && xSemaphoreTake(s_imu_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            active_type = s_active_imu_type;
+            xSemaphoreGive(s_imu_state_mutex);
+        }
     }
     
     // Get assembly mutex
     SemaphoreHandle_t assembly_mutex = sample_application_get_assembly_mutex();
     
-    // Get byte offset from NVS
-    uint8_t byte_start = system_mpu6050_byte_start_load();
+    // Get byte offset from NVS based on active sensor type (read with mutex)
+    uint8_t byte_start;
+    if (s_imu_state_mutex != NULL && xSemaphoreTake(s_imu_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        active_type = s_active_imu_type;
+        xSemaphoreGive(s_imu_state_mutex);
+    }
     
-    // Validate byte offset (MPU6050 uses 20 bytes: 5 int32_t for roll, pitch, ground_angle, bottom_pressure, top_pressure)
-    // Values are stored as scaled integers: degrees * 10000, pressure * 1000
-    const uint8_t mpu6050_data_size = 20;  // 5 int32_t * 4 bytes each
-    if (byte_start + mpu6050_data_size > sizeof(g_assembly_data064)) {
-        ESP_LOGE(TAG, "MPU6050: Invalid byte offset %d (would exceed assembly size for %d bytes)", byte_start, mpu6050_data_size);
+    if (active_type == IMU_TYPE_MPU6050) {
+        byte_start = system_mpu6050_byte_start_load();
+    } else if (active_type == IMU_TYPE_LSM6DS3) {
+        byte_start = system_lsm6ds3_byte_start_load();
+    } else {
+        ESP_LOGE(TAG, "IMU I/O task: No active IMU type, cannot determine byte offset");
         vTaskDelete(NULL);
         return;
     }
     
-    // MPU6050 I/O task started - writing data to Input Assembly 100
+    // Validate byte offset (IMU uses 20 bytes: 5 int32_t for roll, pitch, ground_angle, bottom_pressure, top_pressure)
+    // Values are stored as scaled integers: degrees * 10000, pressure * 1000
+    const uint8_t imu_data_size = 20;  // 5 int32_t * 4 bytes each
+    if (byte_start + imu_data_size > sizeof(g_assembly_data064)) {
+        ESP_LOGE(TAG, "IMU: Invalid byte offset %d (would exceed assembly size for %d bytes)", byte_start, imu_data_size);
+        vTaskDelete(NULL);
+        return;
+    }
     
-    mpu6050_sample_t sample = {0};
     TickType_t last_wake_time = xTaskGetTickCount();
     const TickType_t period_ms = pdMS_TO_TICKS(20);  // 50 Hz update rate (faster updates)
     
+    // Variables for sensor readings
+    float roll = 0.0f, pitch = 0.0f, signed_ground_angle = 0.0f;
+    
     while (1) {
-        // Use cached enabled state (loaded at task startup and updated via API)
-        // No need to poll NVS continuously - state changes are handled via API which updates the cache
+        // Read enabled state and active IMU type with mutex protection
+        bool imu_enabled = false;
+        imu_type_t current_imu_type = IMU_TYPE_NONE;
+        if (s_imu_state_mutex != NULL && xSemaphoreTake(s_imu_state_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+            imu_enabled = s_imu_enabled_cached;
+            current_imu_type = s_active_imu_type;
+            xSemaphoreGive(s_imu_state_mutex);
+        } else {
+            // Fallback: read without mutex (shouldn't happen, but safer)
+            imu_enabled = s_imu_enabled_cached;
+            current_imu_type = active_type;
+        }
         
         // If disabled, zero out assembly bytes and skip reading
-        if (!s_mpu6050_enabled_cached) {
+        if (!imu_enabled) {
             if (assembly_mutex != NULL) {
                 xSemaphoreTake(assembly_mutex, portMAX_DELAY);
             }
-            memset(&g_assembly_data064[byte_start], 0, mpu6050_data_size);  // Clear all 20 bytes
+            memset(&g_assembly_data064[byte_start], 0, imu_data_size);  // Clear all 20 bytes
             if (assembly_mutex != NULL) {
                 xSemaphoreGive(assembly_mutex);
             }
@@ -1737,131 +2116,185 @@ static void mpu6050_io_task(void *pvParameters)
             continue;
         }
         
-        // Read accelerometer and gyroscope data (single read for speed, sensor fusion handles noise)
-        // For even faster updates, we can reduce averaging - sensor fusion provides stability
-        mpu6050_accel_t accel;
-        mpu6050_gyro_t gyro;
-        esp_err_t accel_err = mpu6050_read_accel(&s_mpu6050, &accel);
-        esp_err_t gyro_err = mpu6050_read_gyro(&s_mpu6050, &gyro);
+        // Defensive check: ensure I2C bus handle is still valid
+        if (s_i2c_bus_handle == NULL) {
+            ESP_LOGE(TAG, "IMU I/O task: I2C bus handle became NULL, exiting");
+            vTaskDelete(NULL);
+            return;
+        }
+        
+        // Read sensor data based on active sensor type
+        esp_err_t accel_err = ESP_FAIL;
+        esp_err_t gyro_err = ESP_FAIL;
+        
+        if (current_imu_type == IMU_TYPE_MPU6050) {
+            // MPU6050 path
+            mpu6050_accel_t accel;
+            mpu6050_gyro_t gyro;
+            accel_err = mpu6050_read_accel(&s_mpu6050, &accel);
+            gyro_err = mpu6050_read_gyro(&s_mpu6050, &gyro);
+            
+            if (accel_err == ESP_OK && gyro_err == ESP_OK) {
+                // Convert MPU6050 raw values to mg and mdps (for future use if needed)
+                float accel_mg_local[3];
+                float gyro_mdps_local[3];
+                accel_mg_local[0] = (float)accel.x * s_mpu6050.accel_scale * 1000.0f;  // Convert g to mg
+                accel_mg_local[1] = (float)accel.y * s_mpu6050.accel_scale * 1000.0f;
+                accel_mg_local[2] = (float)accel.z * s_mpu6050.accel_scale * 1000.0f;
+                gyro_mdps_local[0] = (float)gyro.x * s_mpu6050.gyro_scale * 1000.0f;  // Convert dps to mdps
+                gyro_mdps_local[1] = (float)gyro.y * s_mpu6050.gyro_scale * 1000.0f;
+                gyro_mdps_local[2] = (float)gyro.z * s_mpu6050.gyro_scale * 1000.0f;
+                (void)accel_mg_local;  // Suppress unused warning
+                (void)gyro_mdps_local;  // Suppress unused warning
+                
+                // Calculate orientation using MPU6050's built-in function
+                mpu6050_sample_t sample = {0};
+                sample.accel = accel;
+                mpu6050_orientation_t orientation;
+                esp_err_t err = mpu6050_calculate_orientation(&s_mpu6050, &sample.accel, &orientation);
+                
+                if (err == ESP_OK) {
+                    roll = orientation.roll;
+                    pitch = orientation.pitch;
+                    // Calculate signed ground angle
+                    if (orientation.abs_ground_angle > 0.0f) {
+                        signed_ground_angle = (orientation.abs_ground_angle > 90.0f) 
+                            ? -orientation.abs_ground_angle  // Past 90°: force reverses
+                            : orientation.abs_ground_angle;  // 0-90°: normal direction
+                    } else {
+                        signed_ground_angle = 0.0f;
+                    }
+                } else {
+                    ESP_LOGW(TAG, "IMU: Failed to calculate orientation from MPU6050");
+                    vTaskDelayUntil(&last_wake_time, period_ms);
+                    continue;
+                }
+            }
+        } else if (current_imu_type == IMU_TYPE_LSM6DS3) {
+            // LSM6DS3 path
+            float accel_mg_temp[3];
+            float gyro_mdps_temp[3];
+            accel_err = lsm6ds3_read_accel(&s_lsm6ds3_handle, accel_mg_temp);
+            gyro_err = lsm6ds3_read_gyro(&s_lsm6ds3_handle, gyro_mdps_temp);
+            
+            // Debug: Log read errors
+            static uint32_t error_counter = 0;
+            if (accel_err != ESP_OK || gyro_err != ESP_OK) {
+                error_counter++;
+                if (error_counter % 50 == 1) {  // Log every 50 errors to avoid spam
+                    ESP_LOGW(TAG, "LSM6DS3: Read errors - Accel: %s, Gyro: %s (error #%lu)",
+                             esp_err_to_name(accel_err), esp_err_to_name(gyro_err), error_counter);
+                }
+            }
+            
+            if (accel_err == ESP_OK && gyro_err == ESP_OK) {
+                // Convert gyro from mdps to dps for fusion filter
+                float gyro_dps[3];
+                gyro_dps[0] = gyro_mdps_temp[0] / 1000.0f;  // mdps to dps
+                gyro_dps[1] = gyro_mdps_temp[1] / 1000.0f;
+                gyro_dps[2] = gyro_mdps_temp[2] / 1000.0f;
+                
+                // Convert accelerometer from mg to g for fusion filter
+                float accel_g[3];
+                accel_g[0] = accel_mg_temp[0] / 1000.0f;  // mg to g
+                accel_g[1] = accel_mg_temp[1] / 1000.0f;
+                accel_g[2] = accel_mg_temp[2] / 1000.0f;
+                
+                // Update complementary filter with accelerometer and gyroscope data
+                // dt = period_ms / 1000.0f (20ms = 0.02s for 50Hz update rate)
+                float dt = (float)period_ms / 1000.0f;
+                esp_err_t fusion_err = lsm6ds3_complementary_update(&s_lsm6ds3_filter, accel_g, gyro_dps, dt);
+                
+                if (fusion_err == ESP_OK) {
+                    // Get fused angles from complementary filter
+                    lsm6ds3_complementary_get_angles(&s_lsm6ds3_filter, &roll, &pitch);
+                    
+                    // Calculate ground angle from vertical using fused roll and pitch
+                    signed_ground_angle = lsm6ds3_calculate_angle_from_vertical(roll, pitch);
+                    // Apply sign convention: negative for angles > 90°
+                    if (signed_ground_angle > 90.0f) {
+                        signed_ground_angle = -signed_ground_angle;
+                    }
+                    
+                    // Sensor fusion running silently (no console logging)
+                } else {
+                    ESP_LOGW(TAG, "LSM6DS3: Complementary filter update failed: %s", esp_err_to_name(fusion_err));
+                }
+            }
+        }
         
         if (accel_err != ESP_OK || gyro_err != ESP_OK) {
-            ESP_LOGW(TAG, "MPU6050: Failed to read sensor data");
+            ESP_LOGW(TAG, "IMU: Failed to read sensor data");
             vTaskDelayUntil(&last_wake_time, period_ms);
             continue;
         }
         
-        
-        sample.accel = accel;
-        sample.gyro = gyro;
-        
-        // Debug: Log corrected accelerometer values periodically (every 5 seconds)
-        // Calculate orientation (roll, pitch, ground_angle) from corrected accelerometer reading
-        mpu6050_orientation_t orientation;
-        esp_err_t err = mpu6050_calculate_orientation(&s_mpu6050, &sample.accel, &orientation);
-        
-        if (err == ESP_OK) {
-            // ============================================================================
-            // SECTION 1: Calculate signed ground angle for display
-            // ============================================================================
-            // Sign indicates force reversal: positive (0-90°), negative (90-180°)
-            float signed_ground_angle;
-            if (orientation.abs_ground_angle > 0.0f) {
-                signed_ground_angle = (orientation.abs_ground_angle > 90.0f) 
-                    ? -orientation.abs_ground_angle  // Past 90°: force reverses
-                    : orientation.abs_ground_angle;  // 0-90°: normal direction
-            } else {
-                signed_ground_angle = 0.0f;
-            }
+        // ============================================================================
+        // SECTION 1: Calculate signed ground angle for display (already calculated above)
+        // ============================================================================
             
             // ============================================================================
             // SECTION 2: Load configuration parameters
             // ============================================================================
-            // Read tool weight and tip force from Output Assembly 150 (bytes 30, 31)
+            // Read tool weight, tip force, and cylinder bore from Output Assembly 150 (bytes 29, 30, 31)
             // Fall back to NVS if assembly bytes are 0
             float tool_weight_lbs = 50.0f;  // Default
             float desired_tip_force_lbs = 20.0f;  // Default
+            float cylinder_bore_inches = 1.0f;  // Default
             
             if (assembly_mutex != NULL) {
                 xSemaphoreTake(assembly_mutex, portMAX_DELAY);
             }
             
             if (sizeof(g_assembly_data096) >= 32) {
+                // Read cylinder bore from byte 29 (scaled by 100: 0 = use NVS, 1-255 = 0.01-2.55 inches)
+                uint8_t cylinder_bore_byte = g_assembly_data096[29];
+                if (cylinder_bore_byte > 0 && cylinder_bore_byte <= 255) {
+                    cylinder_bore_inches = (float)cylinder_bore_byte / 100.0f;  // Convert from scaled (1-255) to inches (0.01-2.55)
+                } else {
+                    // Fall back to NVS if byte is 0 or out of range
+                    cylinder_bore_inches = system_cylinder_bore_load();
+                }
+                
+                // Read tool weight from byte 30
                 uint8_t tool_weight_byte = g_assembly_data096[30];
                 tool_weight_lbs = (tool_weight_byte > 0) 
                     ? (float)tool_weight_byte 
                     : (float)system_tool_weight_load();
                 
+                // Read tip force from byte 31
                 uint8_t tip_force_byte = g_assembly_data096[31];
                 desired_tip_force_lbs = (tip_force_byte > 0) 
                     ? (float)tip_force_byte 
                     : (float)system_tip_force_load();
+            } else {
+                // Assembly too small, use NVS defaults
+                cylinder_bore_inches = system_cylinder_bore_load();
+                tool_weight_lbs = (float)system_tool_weight_load();
+                desired_tip_force_lbs = (float)system_tip_force_load();
             }
             
             if (assembly_mutex != NULL) {
                 xSemaphoreGive(assembly_mutex);
             }
             
-            // Load cylinder bore size from NVS (defaults to 1.0 inch)
-            const float cylinder_bore_inches = system_cylinder_bore_load();
+            // Use same cylinder bore for both top and bottom cylinders
             const float bottom_cylinder_bore_inches = cylinder_bore_inches;
             const float top_cylinder_bore_inches = cylinder_bore_inches;
             
             // ============================================================================
             // SECTION 3: Sensor fusion - calculate absolute angle from vertical
             // ============================================================================
-            // Complementary filter combines:
-            //   - Accelerometer: accurate long-term, noisy during motion
-            //   - Gyroscope: accurate short-term, drifts over time
+            // For MPU6050: Already calculated above using built-in orientation function
+            // For LSM6DS3: Already calculated above using complementary filter
+            // Both paths now have roll, pitch, and signed_ground_angle available
             
-            // Convert accelerometer to g units
-            float accel_x_g = (float)sample.accel.x * s_mpu6050.accel_scale;
-            float accel_y_g = (float)sample.accel.y * s_mpu6050.accel_scale;
-            float accel_z_g = (float)sample.accel.z * s_mpu6050.accel_scale;
-            float accel_total_g = sqrtf(accel_x_g * accel_x_g + accel_y_g * accel_y_g + accel_z_g * accel_z_g);
-            
-            // Calculate angle from vertical using accelerometer (arccos of normalized Z)
-            float angle_from_accel_rad = 0.0f;
-            if (accel_total_g > 0.1f) {
-                float cos_angle = accel_z_g / accel_total_g;
-                if (cos_angle > 1.0f) cos_angle = 1.0f;
-                if (cos_angle < -1.0f) cos_angle = -1.0f;
-                angle_from_accel_rad = acosf(cos_angle);
-            }
-            
-            // Calculate angular rate from gyroscope (magnitude of X and Y components)
-            float gyro_x_dps = (float)sample.gyro.x * s_mpu6050.gyro_scale;
-            float gyro_y_dps = (float)sample.gyro.y * s_mpu6050.gyro_scale;
-            float gyro_rate_dps = sqrtf(gyro_x_dps * gyro_x_dps + gyro_y_dps * gyro_y_dps);
-            float gyro_rate_rad_per_s = gyro_rate_dps * M_PI / 180.0f;
-            
-            // Calculate time delta for integration
-            int64_t current_time_us = esp_timer_get_time();
-            float dt = (s_last_fusion_time_us > 0) 
-                ? (float)(current_time_us - s_last_fusion_time_us) / 1000000.0f 
-                : 0.0f;
-            
-            // Initialize on first run
-            if (s_last_fusion_time_us == 0) {
-                s_fused_angle_from_vertical_rad = angle_from_accel_rad;
-            }
-            
-            // Complementary filter: alpha = 0.96 (96% gyro, 4% accelerometer)
-            const float alpha = 0.96f;
-            if (dt > 0.0f && dt < 1.0f) {
-                s_fused_angle_from_vertical_rad = alpha * (s_fused_angle_from_vertical_rad + gyro_rate_rad_per_s * dt) 
-                                                   + (1.0f - alpha) * angle_from_accel_rad;
-            } else {
-                s_fused_angle_from_vertical_rad = angle_from_accel_rad;  // Invalid dt, use accel only
-            }
-            
-            s_last_fusion_time_us = current_time_us;
-            
-            // Clamp to valid range [0, π] (0-180°)
-            if (s_fused_angle_from_vertical_rad < 0.0f) s_fused_angle_from_vertical_rad = 0.0f;
-            if (s_fused_angle_from_vertical_rad > M_PI) s_fused_angle_from_vertical_rad = M_PI;
+            // Calculate absolute ground angle from vertical for force calculations
+            float abs_ground_angle_deg = fabsf(signed_ground_angle);
+            float abs_ground_angle_rad = abs_ground_angle_deg * M_PI / 180.0f;
             
             // Calculate gravity component along slide axis
-            float cos_angle_from_vertical = cosf(s_fused_angle_from_vertical_rad);
+            float cos_angle_from_vertical = cosf(abs_ground_angle_rad);
             float gravity_component_lbs = tool_weight_lbs * cos_angle_from_vertical;
             
             // ============================================================================
@@ -1892,36 +2325,50 @@ static void mpu6050_io_task(void *pvParameters)
             // SECTION 6: Format data for Input Assembly
             // ============================================================================
             // Convert to scaled integers: angles × 10000, pressures × 1000
-            int32_t roll_scaled = (int32_t)roundf(orientation.roll * 10000.0f);
-            int32_t pitch_scaled = (int32_t)roundf(orientation.pitch * 10000.0f);
-            int32_t ground_angle_scaled = (int32_t)roundf(signed_ground_angle * 10000.0f);
-            int32_t bottom_pressure_scaled = (int32_t)roundf(bottom_pressure_psi * 1000.0f);
-            int32_t top_pressure_scaled = (int32_t)roundf(top_pressure_psi * 1000.0f);
+            // Add bounds checking to prevent integer overflow
+            // INT32_MAX = 2,147,483,647
+            // For angles: max value = INT32_MAX / 10000 = 214,748.3647 degrees (way beyond physical limits)
+            // For pressure: max value = INT32_MAX / 1000 = 2,147,483.647 PSI (way beyond physical limits)
+            // Clamp values to reasonable physical limits to prevent overflow
+            const float MAX_ANGLE_DEG = 180.0f;  // Physical limit: ±180 degrees
+            const float MAX_PRESSURE_PSI = 10000.0f;  // Physical limit: 10,000 PSI (very high)
+            
+            float roll_clamped = fmaxf(-MAX_ANGLE_DEG, fminf(MAX_ANGLE_DEG, roll));
+            float pitch_clamped = fmaxf(-MAX_ANGLE_DEG, fminf(MAX_ANGLE_DEG, pitch));
+            float ground_angle_clamped = fmaxf(-MAX_ANGLE_DEG, fminf(MAX_ANGLE_DEG, signed_ground_angle));
+            float bottom_pressure_clamped = fmaxf(0.0f, fminf(MAX_PRESSURE_PSI, bottom_pressure_psi));
+            float top_pressure_clamped = fmaxf(0.0f, fminf(MAX_PRESSURE_PSI, top_pressure_psi));
+            
+            int32_t roll_scaled = (int32_t)roundf(roll_clamped * 10000.0f);
+            int32_t pitch_scaled = (int32_t)roundf(pitch_clamped * 10000.0f);
+            int32_t ground_angle_scaled = (int32_t)roundf(ground_angle_clamped * 10000.0f);
+            int32_t bottom_pressure_scaled = (int32_t)roundf(bottom_pressure_clamped * 1000.0f);
+            int32_t top_pressure_scaled = (int32_t)roundf(top_pressure_clamped * 1000.0f);
             
             // Format data into 20 bytes: 5 int32_t (roll, pitch, ground_angle, bottom_pressure, top_pressure) as little-endian
-            uint8_t mpu6050_data[20];
-            mpu6050_data[0] = (uint8_t)(roll_scaled & 0xFF);
-            mpu6050_data[1] = (uint8_t)((roll_scaled >> 8) & 0xFF);
-            mpu6050_data[2] = (uint8_t)((roll_scaled >> 16) & 0xFF);
-            mpu6050_data[3] = (uint8_t)((roll_scaled >> 24) & 0xFF);
-            mpu6050_data[4] = (uint8_t)(pitch_scaled & 0xFF);
-            mpu6050_data[5] = (uint8_t)((pitch_scaled >> 8) & 0xFF);
-            mpu6050_data[6] = (uint8_t)((pitch_scaled >> 16) & 0xFF);
-            mpu6050_data[7] = (uint8_t)((pitch_scaled >> 24) & 0xFF);
-            mpu6050_data[8] = (uint8_t)(ground_angle_scaled & 0xFF);
-            mpu6050_data[9] = (uint8_t)((ground_angle_scaled >> 8) & 0xFF);
-            mpu6050_data[10] = (uint8_t)((ground_angle_scaled >> 16) & 0xFF);
-            mpu6050_data[11] = (uint8_t)((ground_angle_scaled >> 24) & 0xFF);
+            uint8_t imu_data[20];
+            imu_data[0] = (uint8_t)(roll_scaled & 0xFF);
+            imu_data[1] = (uint8_t)((roll_scaled >> 8) & 0xFF);
+            imu_data[2] = (uint8_t)((roll_scaled >> 16) & 0xFF);
+            imu_data[3] = (uint8_t)((roll_scaled >> 24) & 0xFF);
+            imu_data[4] = (uint8_t)(pitch_scaled & 0xFF);
+            imu_data[5] = (uint8_t)((pitch_scaled >> 8) & 0xFF);
+            imu_data[6] = (uint8_t)((pitch_scaled >> 16) & 0xFF);
+            imu_data[7] = (uint8_t)((pitch_scaled >> 24) & 0xFF);
+            imu_data[8] = (uint8_t)(ground_angle_scaled & 0xFF);
+            imu_data[9] = (uint8_t)((ground_angle_scaled >> 8) & 0xFF);
+            imu_data[10] = (uint8_t)((ground_angle_scaled >> 16) & 0xFF);
+            imu_data[11] = (uint8_t)((ground_angle_scaled >> 24) & 0xFF);
             // Bottom cylinder pressure (PSI × 1000)
-            mpu6050_data[12] = (uint8_t)(bottom_pressure_scaled & 0xFF);
-            mpu6050_data[13] = (uint8_t)((bottom_pressure_scaled >> 8) & 0xFF);
-            mpu6050_data[14] = (uint8_t)((bottom_pressure_scaled >> 16) & 0xFF);
-            mpu6050_data[15] = (uint8_t)((bottom_pressure_scaled >> 24) & 0xFF);
+            imu_data[12] = (uint8_t)(bottom_pressure_scaled & 0xFF);
+            imu_data[13] = (uint8_t)((bottom_pressure_scaled >> 8) & 0xFF);
+            imu_data[14] = (uint8_t)((bottom_pressure_scaled >> 16) & 0xFF);
+            imu_data[15] = (uint8_t)((bottom_pressure_scaled >> 24) & 0xFF);
             // Top cylinder pressure (PSI × 1000)
-            mpu6050_data[16] = (uint8_t)(top_pressure_scaled & 0xFF);
-            mpu6050_data[17] = (uint8_t)((top_pressure_scaled >> 8) & 0xFF);
-            mpu6050_data[18] = (uint8_t)((top_pressure_scaled >> 16) & 0xFF);
-            mpu6050_data[19] = (uint8_t)((top_pressure_scaled >> 24) & 0xFF);
+            imu_data[16] = (uint8_t)(top_pressure_scaled & 0xFF);
+            imu_data[17] = (uint8_t)((top_pressure_scaled >> 8) & 0xFF);
+            imu_data[18] = (uint8_t)((top_pressure_scaled >> 16) & 0xFF);
+            imu_data[19] = (uint8_t)((top_pressure_scaled >> 24) & 0xFF);
             
             // Write to Input Assembly 100 with mutex protection
             if (assembly_mutex != NULL) {
@@ -1929,28 +2376,22 @@ static void mpu6050_io_task(void *pvParameters)
             }
             
             // Check bounds again (now using 20 bytes total)
-            const uint8_t mpu6050_total_size = 20;  // 5 int32_t * 4 bytes each
-            if (byte_start + mpu6050_total_size <= sizeof(g_assembly_data064)) {
-                memcpy(&g_assembly_data064[byte_start], mpu6050_data, mpu6050_total_size);
+            const uint8_t imu_total_size = 20;  // 5 int32_t * 4 bytes each
+            if (byte_start + imu_total_size <= sizeof(g_assembly_data064)) {
+                memcpy(&g_assembly_data064[byte_start], imu_data, imu_total_size);
             } else {
-                ESP_LOGW(TAG, "MPU6050: Byte range exceeds assembly size");
+                ESP_LOGW(TAG, "IMU: Byte range exceeds assembly size");
             }
             
-            // Tool weight and tip force are read from Output Assembly 150 (bytes 30 and 31)
+            // Tool weight, tip force, and cylinder bore are read from Output Assembly 150 (bytes 29, 30, and 31)
             // These values are set by the EtherNet/IP client and used in calculations above
+            // Byte 29: Cylinder bore (scaled by 100: 0 = use NVS, 1-255 = 0.01-2.55 inches)
+            // Byte 30: Tool weight (0 = use NVS, 1-255 = weight in lbs)
+            // Byte 31: Tip force (0 = use NVS, 1-255 = force in lbs)
             
             if (assembly_mutex != NULL) {
                 xSemaphoreGive(assembly_mutex);
             }
-        } else {
-            // Log orientation calculation errors occasionally
-            static uint32_t calc_error_count = 0;
-            calc_error_count++;
-            if (calc_error_count % 50 == 1) {
-                ESP_LOGW(TAG, "MPU6050: Failed to calculate orientation: %s (error #%lu)", 
-                        esp_err_to_name(err), calc_error_count);
-            }
-        }
         
         // Wait for next period
         vTaskDelayUntil(&last_wake_time, period_ms);

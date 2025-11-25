@@ -34,6 +34,7 @@
 #include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "lwip/inet.h"
 #include <string.h>
 #include <stdio.h>
@@ -46,6 +47,11 @@ extern uint8_t g_assembly_data097[10];
 
 // Forward declaration for MPU6050 enabled state setter
 extern void sample_application_set_mpu6050_enabled(bool enabled);
+// Forward declaration for LSM6DS3 enabled state setter
+extern void sample_application_set_lsm6ds3_enabled(bool enabled);
+// Forward declaration for LSM6DS3 calibration functions
+extern esp_err_t sample_application_calibrate_lsm6ds3(uint32_t samples, uint32_t sample_delay_ms);
+extern bool sample_application_get_lsm6ds3_calibration_status(float *gyro_offset_mdps);
 
 
 // Forward declaration for assembly mutex access
@@ -59,9 +65,22 @@ static bool s_mpu6050_enabled_cached = false;
 static uint8_t s_cached_mpu6050_byte_start = 0;
 static bool s_mpu6050_byte_start_cached = false;
 
+// Cache for LSM6DS3 enabled state and byte offset to avoid frequent NVS reads
+static bool s_cached_lsm6ds3_enabled = false;
+static bool s_lsm6ds3_enabled_cached = false;
+static uint8_t s_cached_lsm6ds3_byte_start = 0;
+static bool s_lsm6ds3_byte_start_cached = false;
+
 // Cache for Modbus enabled state to avoid frequent NVS reads
 static bool s_cached_modbus_enabled = false;
 static bool s_modbus_enabled_cached = false;
+
+// Cache for I2C pull-up enabled state to avoid frequent NVS reads
+static bool s_cached_i2c_pullup_enabled = false;
+static bool s_i2c_pullup_enabled_cached = false;
+
+// Mutex for protecting g_tcpip structure access (shared between OpENer task and API handlers)
+static SemaphoreHandle_t s_tcpip_mutex = NULL;
 
 // Helper function to send JSON response
 static esp_err_t send_json_response(httpd_req_t *req, cJSON *json, esp_err_t status_code)
@@ -636,10 +655,14 @@ static esp_err_t api_get_status_handler(httpd_req_t *req)
 // GET /api/i2c/pullup - Get I2C pull-up enabled state
 static esp_err_t api_get_i2c_pullup_handler(httpd_req_t *req)
 {
-    bool enabled = system_i2c_internal_pullup_load();
+    // Use cached value if available, otherwise load from NVS and cache it
+    if (!s_i2c_pullup_enabled_cached) {
+        s_cached_i2c_pullup_enabled = system_i2c_internal_pullup_load();
+        s_i2c_pullup_enabled_cached = true;
+    }
     
     cJSON *json = cJSON_CreateObject();
-    cJSON_AddBoolToObject(json, "enabled", enabled);
+    cJSON_AddBoolToObject(json, "enabled", s_cached_i2c_pullup_enabled);
     
     return send_json_response(req, json, ESP_OK);
 }
@@ -675,6 +698,10 @@ static esp_err_t api_post_i2c_pullup_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save I2C pull-up setting");
         return ESP_FAIL;
     }
+    
+    // Update cache when state changes
+    s_cached_i2c_pullup_enabled = enabled;
+    s_i2c_pullup_enabled_cached = true;
     
     cJSON *response = cJSON_CreateObject();
     cJSON_AddStringToObject(response, "status", "ok");
@@ -828,6 +855,307 @@ static esp_err_t api_post_mpu6050_byteoffset_handler(httpd_req_t *req)
     cJSON_AddStringToObject(response, "message", "MPU6050 byte offset saved successfully");
     
     return send_json_response(req, response, ESP_OK);
+}
+
+// GET /api/lsm6ds3/enabled - Get LSM6DS3 enabled state
+static esp_err_t api_get_lsm6ds3_enabled_handler(httpd_req_t *req)
+{
+    // Use cached value if available, otherwise load from NVS and cache it
+    if (!s_lsm6ds3_enabled_cached) {
+        s_cached_lsm6ds3_enabled = system_lsm6ds3_enabled_load();
+        s_lsm6ds3_enabled_cached = true;
+    }
+    
+    cJSON *json = cJSON_CreateObject();
+    cJSON_AddBoolToObject(json, "enabled", s_cached_lsm6ds3_enabled);
+    
+    return send_json_response(req, json, ESP_OK);
+}
+
+// POST /api/lsm6ds3/enabled - Set LSM6DS3 enabled state
+static esp_err_t api_post_lsm6ds3_enabled_handler(httpd_req_t *req)
+{
+    char content[128];
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    content[ret] = '\0';
+    
+    cJSON *json = cJSON_Parse(content);
+    if (json == NULL) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+    
+    cJSON *item = cJSON_GetObjectItem(json, "enabled");
+    if (item == NULL || !cJSON_IsBool(item)) {
+        cJSON_Delete(json);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing or invalid 'enabled' field");
+        return ESP_FAIL;
+    }
+    
+    bool enabled = cJSON_IsTrue(item);
+    cJSON_Delete(json);
+    
+    if (!system_lsm6ds3_enabled_save(enabled)) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save LSM6DS3 state");
+        return ESP_FAIL;
+    }
+    
+    // Update cache when state changes
+    s_cached_lsm6ds3_enabled = enabled;
+    s_lsm6ds3_enabled_cached = true;
+    
+    // Update main.c cache so I/O task picks up the change immediately
+    sample_application_set_lsm6ds3_enabled(enabled);
+    
+    cJSON *response = cJSON_CreateObject();
+    cJSON_AddStringToObject(response, "status", "ok");
+    cJSON_AddBoolToObject(response, "enabled", enabled);
+    cJSON_AddStringToObject(response, "message", "LSM6DS3 state saved successfully");
+    
+    return send_json_response(req, response, ESP_OK);
+}
+
+// GET /api/lsm6ds3/byteoffset - Get LSM6DS3 data byte offset
+static esp_err_t api_get_lsm6ds3_byteoffset_handler(httpd_req_t *req)
+{
+    // Use cached value if available, otherwise load from NVS and cache it
+    if (!s_lsm6ds3_byte_start_cached) {
+        s_cached_lsm6ds3_byte_start = system_lsm6ds3_byte_start_load();
+        s_lsm6ds3_byte_start_cached = true;
+    }
+    
+    cJSON *json = cJSON_CreateObject();
+    cJSON_AddNumberToObject(json, "start_byte", s_cached_lsm6ds3_byte_start);
+    cJSON_AddNumberToObject(json, "end_byte", s_cached_lsm6ds3_byte_start + 19);
+    // Format range string
+    char range_str[16];
+    snprintf(range_str, sizeof(range_str), "%d-%d", s_cached_lsm6ds3_byte_start, s_cached_lsm6ds3_byte_start + 19);
+    cJSON_AddStringToObject(json, "range", range_str);
+    
+    return send_json_response(req, json, ESP_OK);
+}
+
+// POST /api/lsm6ds3/byteoffset - Set LSM6DS3 data byte offset
+static esp_err_t api_post_lsm6ds3_byteoffset_handler(httpd_req_t *req)
+{
+    char content[128];
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    content[ret] = '\0';
+    
+    cJSON *json = cJSON_Parse(content);
+    if (json == NULL) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+    
+    cJSON *item = cJSON_GetObjectItem(json, "start_byte");
+    if (item == NULL || !cJSON_IsNumber(item)) {
+        cJSON_Delete(json);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing or invalid 'start_byte' field");
+        return ESP_FAIL;
+    }
+    
+    uint8_t start_byte = (uint8_t)cJSON_GetNumberValue(item);
+    cJSON_Delete(json);
+    
+    // Validate: must be 0-12 (LSM6DS3 uses 20 bytes: 5 int32_t)
+    if (start_byte > 12) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid start_byte (must be 0-12, uses 20 bytes)");
+        return ESP_FAIL;
+    }
+    
+    // Check bounds
+    const uint8_t lsm6ds3_byte_count = 20;
+    if (start_byte + lsm6ds3_byte_count > sizeof(g_assembly_data064)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Byte range exceeds assembly size");
+        return ESP_FAIL;
+    }
+    
+    if (!system_lsm6ds3_byte_start_save(start_byte)) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save LSM6DS3 byte offset");
+        return ESP_FAIL;
+    }
+    
+    // Update cache when byte offset changes
+    s_cached_lsm6ds3_byte_start = start_byte;
+    s_lsm6ds3_byte_start_cached = true;
+    
+    cJSON *response = cJSON_CreateObject();
+    cJSON_AddStringToObject(response, "status", "ok");
+    cJSON_AddNumberToObject(response, "start_byte", start_byte);
+    cJSON_AddNumberToObject(response, "end_byte", start_byte + 19);
+    char range_str[16];
+    snprintf(range_str, sizeof(range_str), "%d-%d", start_byte, start_byte + 19);
+    cJSON_AddStringToObject(response, "range", range_str);
+    cJSON_AddStringToObject(response, "message", "LSM6DS3 byte offset saved successfully");
+    
+    return send_json_response(req, response, ESP_OK);
+}
+
+// GET /api/lsm6ds3/status - Get LSM6DS3 sensor status and current readings
+static esp_err_t api_get_lsm6ds3_status_handler(httpd_req_t *req)
+{
+    cJSON *json = cJSON_CreateObject();
+    
+    // Get configured LSM6DS3 data start byte offset
+    uint8_t offset;
+    if (!s_lsm6ds3_byte_start_cached) {
+        offset = system_lsm6ds3_byte_start_load();
+        s_cached_lsm6ds3_byte_start = offset;
+        s_lsm6ds3_byte_start_cached = true;
+    } else {
+        offset = s_cached_lsm6ds3_byte_start;
+    }
+    
+    // Validate offset to prevent buffer overflow (LSM6DS3 data needs 20 bytes: 5 int32_t)
+    if (offset + 20 > sizeof(g_assembly_data064)) {
+        return send_json_error(req, "Invalid LSM6DS3 byte offset configuration", 500);
+    }
+    
+    // Read LSM6DS3 orientation and pressure data from assembly buffer using configured offset
+    SemaphoreHandle_t mutex = sample_application_get_assembly_mutex();
+    if (mutex == NULL) {
+        return send_json_error(req, "Assembly mutex not available", 503);
+    }
+    
+    if (xSemaphoreTake(mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return send_json_error(req, "Failed to acquire assembly mutex", 503);
+    }
+    
+    // Read 5 int32_t values: roll, pitch, ground_angle, bottom_pressure, top_pressure
+    int32_t roll_scaled, pitch_scaled, ground_angle_scaled, bottom_pressure_scaled, top_pressure_scaled;
+    memcpy(&roll_scaled, &g_assembly_data064[offset], sizeof(int32_t));
+    memcpy(&pitch_scaled, &g_assembly_data064[offset + 4], sizeof(int32_t));
+    memcpy(&ground_angle_scaled, &g_assembly_data064[offset + 8], sizeof(int32_t));
+    memcpy(&bottom_pressure_scaled, &g_assembly_data064[offset + 12], sizeof(int32_t));
+    memcpy(&top_pressure_scaled, &g_assembly_data064[offset + 16], sizeof(int32_t));
+    
+    xSemaphoreGive(mutex);
+    
+    // Convert scaled integers to floats
+    float roll = roll_scaled / 10000.0f;  // degrees * 10000
+    float pitch = pitch_scaled / 10000.0f;  // degrees * 10000
+    float ground_angle = ground_angle_scaled / 10000.0f;  // degrees * 10000
+    float bottom_pressure = bottom_pressure_scaled / 1000.0f;  // PSI * 1000
+    float top_pressure = top_pressure_scaled / 1000.0f;  // PSI * 1000
+    
+    // Get enabled state
+    bool enabled;
+    if (!s_lsm6ds3_enabled_cached) {
+        enabled = system_lsm6ds3_enabled_load();
+        s_cached_lsm6ds3_enabled = enabled;
+        s_lsm6ds3_enabled_cached = true;
+    } else {
+        enabled = s_cached_lsm6ds3_enabled;
+    }
+    
+    // Add orientation data (as floats for JSON, but stored as scaled integers in assembly)
+    cJSON_AddNumberToObject(json, "roll", roll);
+    cJSON_AddNumberToObject(json, "pitch", pitch);
+    cJSON_AddNumberToObject(json, "ground_angle", ground_angle);
+    
+    // Add pressure data
+    cJSON_AddNumberToObject(json, "bottom_pressure_psi", bottom_pressure);
+    cJSON_AddNumberToObject(json, "top_pressure_psi", top_pressure);
+    
+    // Also add raw scaled integer values for reference
+    cJSON_AddNumberToObject(json, "roll_scaled", roll_scaled);
+    cJSON_AddNumberToObject(json, "pitch_scaled", pitch_scaled);
+    cJSON_AddNumberToObject(json, "ground_angle_scaled", ground_angle_scaled);
+    cJSON_AddNumberToObject(json, "bottom_pressure_scaled", bottom_pressure_scaled);
+    cJSON_AddNumberToObject(json, "top_pressure_scaled", top_pressure_scaled);
+    
+    // Add configuration info
+    cJSON_AddBoolToObject(json, "enabled", enabled);
+    cJSON_AddNumberToObject(json, "byte_offset", offset);
+    cJSON_AddNumberToObject(json, "byte_range_start", offset);
+    cJSON_AddNumberToObject(json, "byte_range_end", offset + 19);
+    
+    return send_json_response(req, json, ESP_OK);
+}
+
+// GET /api/lsm6ds3/calibrate - Get LSM6DS3 calibration status
+static esp_err_t api_get_lsm6ds3_calibrate_handler(httpd_req_t *req)
+{
+    float gyro_offset_mdps[3] = {0.0f, 0.0f, 0.0f};
+    bool calibrated = sample_application_get_lsm6ds3_calibration_status(gyro_offset_mdps);
+    
+    cJSON *json = cJSON_CreateObject();
+    cJSON_AddBoolToObject(json, "calibrated", calibrated);
+    cJSON_AddNumberToObject(json, "gyro_offset_x_mdps", gyro_offset_mdps[0]);
+    cJSON_AddNumberToObject(json, "gyro_offset_y_mdps", gyro_offset_mdps[1]);
+    cJSON_AddNumberToObject(json, "gyro_offset_z_mdps", gyro_offset_mdps[2]);
+    
+    return send_json_response(req, json, ESP_OK);
+}
+
+// POST /api/lsm6ds3/calibrate - Trigger LSM6DS3 calibration
+static esp_err_t api_post_lsm6ds3_calibrate_handler(httpd_req_t *req)
+{
+    char content[128];
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    content[ret] = '\0';
+    
+    // Parse JSON (optional parameters)
+    uint32_t samples = 100;  // Default: 100 samples
+    uint32_t sample_delay_ms = 20;  // Default: 20ms delay
+    
+    cJSON *json = cJSON_Parse(content);
+    if (json != NULL) {
+        cJSON *item = cJSON_GetObjectItem(json, "samples");
+        if (item != NULL && cJSON_IsNumber(item)) {
+            int samples_int = (int)cJSON_GetNumberValue(item);
+            if (samples_int > 0 && samples_int <= 1000) {
+                samples = (uint32_t)samples_int;
+            }
+        }
+        
+        item = cJSON_GetObjectItem(json, "sample_delay_ms");
+        if (item != NULL && cJSON_IsNumber(item)) {
+            int delay_int = (int)cJSON_GetNumberValue(item);
+            if (delay_int > 0 && delay_int <= 1000) {
+                sample_delay_ms = (uint32_t)delay_int;
+            }
+        }
+        cJSON_Delete(json);
+    }
+    
+    // Trigger calibration
+    esp_err_t err = sample_application_calibrate_lsm6ds3(samples, sample_delay_ms);
+    
+    cJSON *response = cJSON_CreateObject();
+    if (err == ESP_OK) {
+        // Get calibration results
+        float gyro_offset_mdps[3] = {0.0f, 0.0f, 0.0f};
+        sample_application_get_lsm6ds3_calibration_status(gyro_offset_mdps);
+        
+        cJSON_AddStringToObject(response, "status", "ok");
+        cJSON_AddStringToObject(response, "message", "LSM6DS3 calibration complete");
+        cJSON_AddBoolToObject(response, "calibrated", true);
+        cJSON_AddNumberToObject(response, "gyro_offset_x_mdps", gyro_offset_mdps[0]);
+        cJSON_AddNumberToObject(response, "gyro_offset_y_mdps", gyro_offset_mdps[1]);
+        cJSON_AddNumberToObject(response, "gyro_offset_z_mdps", gyro_offset_mdps[2]);
+        cJSON_AddNumberToObject(response, "samples", samples);
+        cJSON_AddNumberToObject(response, "sample_delay_ms", sample_delay_ms);
+    } else {
+        cJSON_AddStringToObject(response, "status", "error");
+        cJSON_AddStringToObject(response, "message", "LSM6DS3 calibration failed - sensor may not be initialized");
+        cJSON_AddBoolToObject(response, "calibrated", false);
+    }
+    
+    return send_json_response(req, response, err == ESP_OK ? ESP_OK : ESP_FAIL);
 }
 
 // GET /api/mpu6050/status - Get MPU6050 sensor status and current readings
@@ -1149,26 +1477,51 @@ static void ip_uint32_to_string(uint32_t ip, char *buf, size_t buf_size)
 // GET /api/ipconfig - Get IP configuration
 static esp_err_t api_get_ipconfig_handler(httpd_req_t *req)
 {
+    // Initialize mutex if needed (thread-safe lazy initialization)
+    if (s_tcpip_mutex == NULL) {
+        s_tcpip_mutex = xSemaphoreCreateMutex();
+        if (s_tcpip_mutex == NULL) {
+            ESP_LOGE(TAG, "Failed to create TCP/IP mutex");
+            return send_json_error(req, "Internal error: mutex creation failed", 500);
+        }
+    }
+    
     // Always read from OpENer's g_tcpip (single source of truth)
+    // Protect with mutex to prevent race conditions with OpENer task
+    if (xSemaphoreTake(s_tcpip_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGW(TAG, "Timeout waiting for TCP/IP mutex");
+        return send_json_error(req, "Timeout accessing IP configuration", 500);
+    }
+    
     bool use_dhcp = (g_tcpip.config_control & kTcpipCfgCtrlMethodMask) == kTcpipCfgCtrlDhcp;
     
+    // Copy values to local variables while holding mutex
+    uint32_t ip_address = g_tcpip.interface_configuration.ip_address;
+    uint32_t network_mask = g_tcpip.interface_configuration.network_mask;
+    uint32_t gateway = g_tcpip.interface_configuration.gateway;
+    uint32_t name_server = g_tcpip.interface_configuration.name_server;
+    uint32_t name_server_2 = g_tcpip.interface_configuration.name_server_2;
+    
+    xSemaphoreGive(s_tcpip_mutex);
+    
+    // Build JSON response outside of mutex (safer, no blocking)
     cJSON *json = cJSON_CreateObject();
     cJSON_AddBoolToObject(json, "use_dhcp", use_dhcp);
     
     char ip_str[16];
-    ip_uint32_to_string(g_tcpip.interface_configuration.ip_address, ip_str, sizeof(ip_str));
+    ip_uint32_to_string(ip_address, ip_str, sizeof(ip_str));
     cJSON_AddStringToObject(json, "ip_address", ip_str);
     
-    ip_uint32_to_string(g_tcpip.interface_configuration.network_mask, ip_str, sizeof(ip_str));
+    ip_uint32_to_string(network_mask, ip_str, sizeof(ip_str));
     cJSON_AddStringToObject(json, "netmask", ip_str);
     
-    ip_uint32_to_string(g_tcpip.interface_configuration.gateway, ip_str, sizeof(ip_str));
+    ip_uint32_to_string(gateway, ip_str, sizeof(ip_str));
     cJSON_AddStringToObject(json, "gateway", ip_str);
     
-    ip_uint32_to_string(g_tcpip.interface_configuration.name_server, ip_str, sizeof(ip_str));
+    ip_uint32_to_string(name_server, ip_str, sizeof(ip_str));
     cJSON_AddStringToObject(json, "dns1", ip_str);
     
-    ip_uint32_to_string(g_tcpip.interface_configuration.name_server_2, ip_str, sizeof(ip_str));
+    ip_uint32_to_string(name_server_2, ip_str, sizeof(ip_str));
     cJSON_AddStringToObject(json, "dns2", ip_str);
     
     return send_json_response(req, json, ESP_OK);
@@ -1191,11 +1544,88 @@ static esp_err_t api_post_ipconfig_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
     
-    // Update g_tcpip directly (single source of truth)
+    // Parse JSON first (before taking mutex)
     cJSON *item = cJSON_GetObjectItem(json, "use_dhcp");
+    bool use_dhcp_requested = false;
+    bool use_dhcp_set = false;
     if (item != NULL && cJSON_IsBool(item)) {
-        bool use_dhcp = cJSON_IsTrue(item);
-        if (use_dhcp) {
+        use_dhcp_requested = cJSON_IsTrue(item);
+        use_dhcp_set = true;
+    }
+    
+    // Parse IP configuration values
+    uint32_t ip_address_new = 0;
+    uint32_t network_mask_new = 0;
+    uint32_t gateway_new = 0;
+    uint32_t name_server_new = 0;
+    uint32_t name_server_2_new = 0;
+    bool ip_address_set = false;
+    bool network_mask_set = false;
+    bool gateway_set = false;
+    bool name_server_set = false;
+    bool name_server_2_set = false;
+    
+    // Read current config_control to determine if we should parse IP settings
+    bool is_static_ip = false;
+    if (s_tcpip_mutex != NULL && xSemaphoreTake(s_tcpip_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        is_static_ip = ((g_tcpip.config_control & kTcpipCfgCtrlMethodMask) == kTcpipCfgCtrlStaticIp);
+        xSemaphoreGive(s_tcpip_mutex);
+    }
+    
+    if (is_static_ip || !use_dhcp_requested) {
+        item = cJSON_GetObjectItem(json, "ip_address");
+        if (item != NULL && cJSON_IsString(item)) {
+            ip_address_new = ip_string_to_uint32(cJSON_GetStringValue(item));
+            ip_address_set = true;
+        }
+        
+        item = cJSON_GetObjectItem(json, "netmask");
+        if (item != NULL && cJSON_IsString(item)) {
+            network_mask_new = ip_string_to_uint32(cJSON_GetStringValue(item));
+            network_mask_set = true;
+        }
+        
+        item = cJSON_GetObjectItem(json, "gateway");
+        if (item != NULL && cJSON_IsString(item)) {
+            gateway_new = ip_string_to_uint32(cJSON_GetStringValue(item));
+            gateway_set = true;
+        }
+    }
+    
+    item = cJSON_GetObjectItem(json, "dns1");
+    if (item != NULL && cJSON_IsString(item)) {
+        name_server_new = ip_string_to_uint32(cJSON_GetStringValue(item));
+        name_server_set = true;
+    }
+    
+    item = cJSON_GetObjectItem(json, "dns2");
+    if (item != NULL && cJSON_IsString(item)) {
+        name_server_2_new = ip_string_to_uint32(cJSON_GetStringValue(item));
+        name_server_2_set = true;
+    }
+    
+    cJSON_Delete(json);
+    
+    // Initialize mutex if needed
+    if (s_tcpip_mutex == NULL) {
+        s_tcpip_mutex = xSemaphoreCreateMutex();
+        if (s_tcpip_mutex == NULL) {
+            ESP_LOGE(TAG, "Failed to create TCP/IP mutex");
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Internal error: mutex creation failed");
+            return ESP_FAIL;
+        }
+    }
+    
+    // Update g_tcpip with mutex protection
+    if (xSemaphoreTake(s_tcpip_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGW(TAG, "Timeout waiting for TCP/IP mutex");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Timeout accessing IP configuration");
+        return ESP_FAIL;
+    }
+    
+    // Update configuration control
+    if (use_dhcp_set) {
+        if (use_dhcp_requested) {
             g_tcpip.config_control &= ~kTcpipCfgCtrlMethodMask;
             g_tcpip.config_control |= kTcpipCfgCtrlDhcp;
             g_tcpip.interface_configuration.ip_address = 0;
@@ -1207,38 +1637,28 @@ static esp_err_t api_post_ipconfig_handler(httpd_req_t *req)
         }
     }
     
-    if ((g_tcpip.config_control & kTcpipCfgCtrlMethodMask) == kTcpipCfgCtrlStaticIp) {
-        // Only update IP settings if using static IP
-        item = cJSON_GetObjectItem(json, "ip_address");
-        if (item != NULL && cJSON_IsString(item)) {
-            g_tcpip.interface_configuration.ip_address = ip_string_to_uint32(cJSON_GetStringValue(item));
-        }
-        
-        item = cJSON_GetObjectItem(json, "netmask");
-        if (item != NULL && cJSON_IsString(item)) {
-            g_tcpip.interface_configuration.network_mask = ip_string_to_uint32(cJSON_GetStringValue(item));
-        }
-        
-        item = cJSON_GetObjectItem(json, "gateway");
-        if (item != NULL && cJSON_IsString(item)) {
-            g_tcpip.interface_configuration.gateway = ip_string_to_uint32(cJSON_GetStringValue(item));
-        }
+    // Update IP settings if provided
+    if (ip_address_set) {
+        g_tcpip.interface_configuration.ip_address = ip_address_new;
+    }
+    if (network_mask_set) {
+        g_tcpip.interface_configuration.network_mask = network_mask_new;
+    }
+    if (gateway_set) {
+        g_tcpip.interface_configuration.gateway = gateway_new;
+    }
+    if (name_server_set) {
+        g_tcpip.interface_configuration.name_server = name_server_new;
+    }
+    if (name_server_2_set) {
+        g_tcpip.interface_configuration.name_server_2 = name_server_2_new;
     }
     
-    item = cJSON_GetObjectItem(json, "dns1");
-    if (item != NULL && cJSON_IsString(item)) {
-        g_tcpip.interface_configuration.name_server = ip_string_to_uint32(cJSON_GetStringValue(item));
-    }
+    // Save to NVS while holding mutex
+    EipStatus nvs_status = NvTcpipStore(&g_tcpip);
+    xSemaphoreGive(s_tcpip_mutex);
     
-    item = cJSON_GetObjectItem(json, "dns2");
-    if (item != NULL && cJSON_IsString(item)) {
-        g_tcpip.interface_configuration.name_server_2 = ip_string_to_uint32(cJSON_GetStringValue(item));
-    }
-    
-    cJSON_Delete(json);
-    
-    // Save directly to OpENer's NVS
-    if (NvTcpipStore(&g_tcpip) != kEipStatusOk) {
+    if (nvs_status != kEipStatusOk) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save IP configuration");
         return ESP_FAIL;
     }
@@ -1407,6 +1827,84 @@ void webui_register_api_handlers(httpd_handle_t server)
         .user_ctx  = NULL
     };
     httpd_register_uri_handler(server, &post_cylinder_bore_uri);
+    
+    // GET /api/lsm6ds3/enabled
+    httpd_uri_t get_lsm6ds3_enabled_uri = {
+        .uri       = "/api/lsm6ds3/enabled",
+        .method    = HTTP_GET,
+        .handler   = api_get_lsm6ds3_enabled_handler,
+        .user_ctx  = NULL
+    };
+    httpd_register_uri_handler(server, &get_lsm6ds3_enabled_uri);
+    
+    // POST /api/lsm6ds3/enabled
+    httpd_uri_t post_lsm6ds3_enabled_uri = {
+        .uri       = "/api/lsm6ds3/enabled",
+        .method    = HTTP_POST,
+        .handler   = api_post_lsm6ds3_enabled_handler,
+        .user_ctx  = NULL
+    };
+    httpd_register_uri_handler(server, &post_lsm6ds3_enabled_uri);
+    
+    // GET /api/lsm6ds3/byteoffset
+    httpd_uri_t get_lsm6ds3_byteoffset_uri = {
+        .uri       = "/api/lsm6ds3/byteoffset",
+        .method    = HTTP_GET,
+        .handler   = api_get_lsm6ds3_byteoffset_handler,
+        .user_ctx  = NULL
+    };
+    httpd_register_uri_handler(server, &get_lsm6ds3_byteoffset_uri);
+    
+    // POST /api/lsm6ds3/byteoffset
+    httpd_uri_t post_lsm6ds3_byteoffset_uri = {
+        .uri       = "/api/lsm6ds3/byteoffset",
+        .method    = HTTP_POST,
+        .handler   = api_post_lsm6ds3_byteoffset_handler,
+        .user_ctx  = NULL
+    };
+    httpd_register_uri_handler(server, &post_lsm6ds3_byteoffset_uri);
+    
+    // GET /api/lsm6ds3/status
+    httpd_uri_t get_lsm6ds3_status_uri = {
+        .uri       = "/api/lsm6ds3/status",
+        .method    = HTTP_GET,
+        .handler   = api_get_lsm6ds3_status_handler,
+        .user_ctx  = NULL
+    };
+    esp_err_t ret_lsm6ds3_status = httpd_register_uri_handler(server, &get_lsm6ds3_status_uri);
+    if (ret_lsm6ds3_status != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register GET /api/lsm6ds3/status: %s", esp_err_to_name(ret_lsm6ds3_status));
+    } else {
+        ESP_LOGI(TAG, "Registered GET /api/lsm6ds3/status handler");
+    }
+    
+    // GET /api/lsm6ds3/calibrate
+    httpd_uri_t get_lsm6ds3_calibrate_uri = {
+        .uri       = "/api/lsm6ds3/calibrate",
+        .method    = HTTP_GET,
+        .handler   = api_get_lsm6ds3_calibrate_handler,
+        .user_ctx  = NULL
+    };
+    esp_err_t ret_lsm6ds3_calibrate_get = httpd_register_uri_handler(server, &get_lsm6ds3_calibrate_uri);
+    if (ret_lsm6ds3_calibrate_get != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register GET /api/lsm6ds3/calibrate: %s", esp_err_to_name(ret_lsm6ds3_calibrate_get));
+    } else {
+        ESP_LOGI(TAG, "Registered GET /api/lsm6ds3/calibrate handler");
+    }
+    
+    // POST /api/lsm6ds3/calibrate
+    httpd_uri_t post_lsm6ds3_calibrate_uri = {
+        .uri       = "/api/lsm6ds3/calibrate",
+        .method    = HTTP_POST,
+        .handler   = api_post_lsm6ds3_calibrate_handler,
+        .user_ctx  = NULL
+    };
+    esp_err_t ret_lsm6ds3_calibrate_post = httpd_register_uri_handler(server, &post_lsm6ds3_calibrate_uri);
+    if (ret_lsm6ds3_calibrate_post != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register POST /api/lsm6ds3/calibrate: %s", esp_err_to_name(ret_lsm6ds3_calibrate_post));
+    } else {
+        ESP_LOGI(TAG, "Registered POST /api/lsm6ds3/calibrate handler");
+    }
     
     
     // GET /api/assemblies/sizes

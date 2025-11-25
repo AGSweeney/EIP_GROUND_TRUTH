@@ -145,6 +145,32 @@ uint8_t system_mpu6050_byte_start_load(void);
 bool system_mpu6050_byte_start_save(uint8_t byte_start);
 
 /**
+ * @brief Load LSM6DS3 enabled state from NVS
+ * @return true if LSM6DS3 is enabled, false if disabled or not set
+ */
+bool system_lsm6ds3_enabled_load(void);
+
+/**
+ * @brief Save LSM6DS3 enabled state to NVS
+ * @param enabled true to enable LSM6DS3, false to disable
+ * @return true on success, false on error
+ */
+bool system_lsm6ds3_enabled_save(bool enabled);
+
+/**
+ * @brief Load LSM6DS3 input byte start from NVS
+ * @return byte start position (default 0 if not set)
+ */
+uint8_t system_lsm6ds3_byte_start_load(void);
+
+/**
+ * @brief Save LSM6DS3 input byte start to NVS
+ * @param byte_start starting byte position in Input Assembly (0-12, uses 20 bytes: roll, pitch, ground_angle, bottom_pressure, top_pressure)
+ * @return true on success, false on error
+ */
+bool system_lsm6ds3_byte_start_save(uint8_t byte_start);
+
+/**
  * @brief Load tool weight from NVS
  * @return Tool weight in lbs (defaults to 50 if not set)
  */

@@ -126,19 +126,33 @@ Get MPU6050 sensor status and current readings.
 ```json
 {
   "enabled": true,
-  "angle_deg": 12.34,
-  "pressure1_psi": 123.4,
-  "pressure2_psi": 87.6,
-  "temperature_c": 25.5
+  "roll": 12.3456,
+  "pitch": -5.6789,
+  "ground_angle": 13.4500,
+  "bottom_pressure_psi": 123.456,
+  "top_pressure_psi": 87.650,
+  "roll_scaled": 123456,
+  "pitch_scaled": -56789,
+  "ground_angle_scaled": 134500,
+  "bottom_pressure_scaled": 123456,
+  "top_pressure_scaled": 87650,
+  "byte_offset": 0,
+  "byte_range_start": 0,
+  "byte_range_end": 19
 }
 ```
 
 **Fields:**
 - `enabled`: Whether MPU6050 is enabled
-- `angle_deg`: Fused angle from vertical in degrees
-- `pressure1_psi`: Cylinder 1 pressure in PSI
-- `pressure2_psi`: Cylinder 2 pressure in PSI
-- `temperature_c`: MPU6050 internal temperature in Celsius
+- `roll`: Roll angle in degrees
+- `pitch`: Pitch angle in degrees
+- `ground_angle`: Ground angle from vertical in degrees
+- `bottom_pressure_psi`: Bottom cylinder pressure in PSI
+- `top_pressure_psi`: Top cylinder pressure in PSI
+- `roll_scaled`, `pitch_scaled`, `ground_angle_scaled`: Raw scaled integer values (degrees × 10000)
+- `bottom_pressure_scaled`, `top_pressure_scaled`: Raw scaled integer values (PSI × 1000)
+- `byte_offset`: Starting byte offset in Input Assembly 100
+- `byte_range_start`, `byte_range_end`: Byte range used (20 bytes total)
 
 ---
 
@@ -195,7 +209,208 @@ Set MPU6050 IMU enabled state.
 
 ---
 
-**Note:** MPU6050 data is fixed at bytes 0-15 (16 bytes) in Input Assembly 100. The byte offset is not configurable.
+**Note:** MPU6050 data uses 20 bytes (5 int32_t values: roll, pitch, ground_angle, bottom_pressure, top_pressure) in Input Assembly 100. The byte offset is configurable (0-12).
+
+---
+
+## LSM6DS3 IMU Configuration
+
+The LSM6DS3 is a fallback IMU sensor that is used when MPU6050 is not detected. It provides the same data format and functionality as MPU6050.
+
+### GET /api/lsm6ds3/enabled
+
+Get LSM6DS3 IMU enabled state.
+
+**Response:**
+```json
+{
+  "enabled": true
+}
+```
+
+### POST /api/lsm6ds3/enabled
+
+Set LSM6DS3 IMU enabled state. Changes take effect immediately.
+
+**Request:**
+```json
+{
+  "enabled": true
+}
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "enabled": true,
+  "message": "LSM6DS3 state saved successfully"
+}
+```
+
+---
+
+### GET /api/lsm6ds3/byteoffset
+
+Get LSM6DS3 data byte offset in Input Assembly 100.
+
+**Response:**
+```json
+{
+  "start_byte": 0,
+  "end_byte": 19,
+  "range": "0-19"
+}
+```
+
+**Fields:**
+- `start_byte`: Starting byte position (0-12)
+- `end_byte`: Ending byte position (start_byte + 19)
+- `range`: Human-readable range string
+
+### POST /api/lsm6ds3/byteoffset
+
+Set LSM6DS3 data byte offset in Input Assembly 100.
+
+**Request:**
+```json
+{
+  "start_byte": 0
+}
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "start_byte": 0,
+  "end_byte": 19,
+  "range": "0-19",
+  "message": "LSM6DS3 byte offset saved successfully"
+}
+```
+
+**Notes:**
+- Valid range: 0-12 (LSM6DS3 uses 20 bytes: 5 int32_t values)
+- Changes take effect immediately
+- Data format: roll, pitch, ground_angle, bottom_pressure, top_pressure (each as int32_t, scaled: degrees * 10000, pressure * 1000)
+
+---
+
+### GET /api/lsm6ds3/status
+
+Get LSM6DS3 sensor status and current readings.
+
+**Response:**
+```json
+{
+  "enabled": true,
+  "roll": 12.34,
+  "pitch": -5.67,
+  "ground_angle": 13.45,
+  "bottom_pressure_psi": 123.4,
+  "top_pressure_psi": 87.6,
+  "roll_scaled": 123400,
+  "pitch_scaled": -56700,
+  "ground_angle_scaled": 134500,
+  "bottom_pressure_scaled": 123400,
+  "top_pressure_scaled": 87600,
+  "byte_offset": 0,
+  "byte_range_start": 0,
+  "byte_range_end": 19
+}
+```
+
+**Fields:**
+- `enabled`: Whether LSM6DS3 is enabled
+- `roll`: Roll angle in degrees (float)
+- `pitch`: Pitch angle in degrees (float)
+- `ground_angle`: Angle from vertical in degrees (float)
+- `bottom_pressure_psi`: Bottom cylinder pressure in PSI (float)
+- `top_pressure_psi`: Top cylinder pressure in PSI (float)
+- `*_scaled`: Raw scaled integer values (degrees * 10000, pressure * 1000)
+- `byte_offset`: Current byte offset in Input Assembly 100
+- `byte_range_start`: Starting byte of data range
+- `byte_range_end`: Ending byte of data range
+
+**Notes:**
+- LSM6DS3 is used as a fallback when MPU6050 is not detected
+- Data format matches MPU6050 for compatibility
+- Uses sensor fusion (complementary filter) for accurate orientation
+
+---
+
+### GET /api/lsm6ds3/calibrate
+
+Get LSM6DS3 gyroscope calibration status and current offset values.
+
+**Response:**
+```json
+{
+  "calibrated": true,
+  "gyro_offset_x_mdps": 12743.50,
+  "gyro_offset_y_mdps": -31052.70,
+  "gyro_offset_z_mdps": -8773.10
+}
+```
+
+**Fields:**
+- `calibrated`: Whether the sensor has been calibrated
+- `gyro_offset_x_mdps`: X-axis gyroscope offset in millidegrees per second
+- `gyro_offset_y_mdps`: Y-axis gyroscope offset in millidegrees per second
+- `gyro_offset_z_mdps`: Z-axis gyroscope offset in millidegrees per second
+
+**Notes:**
+- Calibration values are stored in NVS and persist across reboots
+- If `calibrated` is `false`, offset values will be 0
+
+---
+
+### POST /api/lsm6ds3/calibrate
+
+Trigger LSM6DS3 gyroscope calibration. **Device must be kept still during calibration.**
+
+**Request (optional parameters):**
+```json
+{
+  "samples": 100,
+  "sample_delay_ms": 20
+}
+```
+
+**Parameters:**
+- `samples` (optional): Number of samples to collect (default: 100, range: 1-1000)
+- `sample_delay_ms` (optional): Delay between samples in milliseconds (default: 20, range: 1-1000)
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "message": "LSM6DS3 calibration complete",
+  "calibrated": true,
+  "gyro_offset_x_mdps": 12743.50,
+  "gyro_offset_y_mdps": -31052.70,
+  "gyro_offset_z_mdps": -8773.10,
+  "samples": 100,
+  "sample_delay_ms": 20
+}
+```
+
+**Error Response:**
+```json
+{
+  "status": "error",
+  "message": "LSM6DS3 calibration failed - sensor may not be initialized",
+  "calibrated": false
+}
+```
+
+**Notes:**
+- Calibration takes approximately `samples * sample_delay_ms` milliseconds (default: ~2 seconds)
+- Device must be kept completely still during calibration for accurate results
+- Calibration values are automatically saved to NVS and will be loaded on next boot
+- If sensor is not initialized, returns error status
+- Default calibration: 100 samples at 20ms intervals = 2 seconds total
 
 ---
 

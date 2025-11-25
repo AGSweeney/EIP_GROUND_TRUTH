@@ -38,6 +38,8 @@ static const char *NVS_KEY_MCP_DEVICE_TYPE = "mcp_dev_type";  // 0 = MCP23017, 1
 static const char *NVS_KEY_MCP_UPDATE_RATE_MS = "mcp_upd_rate";  // Update rate in milliseconds
 static const char *NVS_KEY_MPU6050_ENABLED = "mpu6050_enabled";
 static const char *NVS_KEY_MPU6050_BYTE_START = "mpu6050_byte";
+static const char *NVS_KEY_LSM6DS3_ENABLED = "lsm6ds3_enabled";
+static const char *NVS_KEY_LSM6DS3_BYTE_START = "lsm6ds3_byte";
 static const char *NVS_KEY_TOOL_WEIGHT = "tool_weight";
 static const char *NVS_KEY_TIP_FORCE = "tip_force";
 static const char *NVS_KEY_CYLINDER_BORE = "cyl_bore";
@@ -665,6 +667,140 @@ bool system_mpu6050_byte_start_save(uint8_t byte_start)
     }
     
     ESP_LOGI(TAG, "MPU6050 byte start saved to NVS: %d", byte_start);
+    return true;
+}
+
+bool system_lsm6ds3_enabled_load(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        if (err == ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGI(TAG, "No saved LSM6DS3 enabled state found, defaulting to disabled");
+            return false;  // Default to disabled
+        }
+        ESP_LOGE(TAG, "Failed to open NVS namespace: %s", esp_err_to_name(err));
+        return false;  // Default to disabled on error
+    }
+    
+    uint8_t enabled = 0;  // Default to disabled
+    size_t required_size = sizeof(uint8_t);
+    err = nvs_get_blob(handle, NVS_KEY_LSM6DS3_ENABLED, &enabled, &required_size);
+    nvs_close(handle);
+    
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGI(TAG, "No saved LSM6DS3 enabled state found, defaulting to disabled");
+        return false;  // Default to disabled
+    }
+    
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to load LSM6DS3 enabled state: %s", esp_err_to_name(err));
+        return false;  // Default to disabled on error
+    }
+    
+    return enabled != 0;
+}
+
+bool system_lsm6ds3_enabled_save(bool enabled)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open NVS namespace: %s", esp_err_to_name(err));
+        return false;
+    }
+    
+    uint8_t enabled_val = enabled ? 1 : 0;
+    err = nvs_set_blob(handle, NVS_KEY_LSM6DS3_ENABLED, &enabled_val, sizeof(uint8_t));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save LSM6DS3 enabled state: %s", esp_err_to_name(err));
+        nvs_close(handle);
+        return false;
+    }
+    
+    err = nvs_commit(handle);
+    nvs_close(handle);
+    
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to commit LSM6DS3 enabled state: %s", esp_err_to_name(err));
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "LSM6DS3 enabled state saved successfully to NVS: %s", enabled ? "enabled" : "disabled");
+    return true;
+}
+
+uint8_t system_lsm6ds3_byte_start_load(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        if (err == ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGI(TAG, "No saved LSM6DS3 byte start found, defaulting to 0");
+            return 0;  // Default to 0 (bytes 0-19 for roll, pitch, ground_angle, bottom_pressure, top_pressure)
+        }
+        ESP_LOGE(TAG, "Failed to open NVS namespace: %s", esp_err_to_name(err));
+        return 0;  // Default to 0 on error
+    }
+    
+    uint8_t byte_start = 0;  // Default to 0
+    size_t required_size = sizeof(uint8_t);
+    err = nvs_get_blob(handle, NVS_KEY_LSM6DS3_BYTE_START, &byte_start, &required_size);
+    nvs_close(handle);
+    
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGI(TAG, "No saved LSM6DS3 byte start found, defaulting to 0");
+        return 0;  // Default to 0
+    }
+    
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to load LSM6DS3 byte start: %s", esp_err_to_name(err));
+        return 0;  // Default to 0 on error
+    }
+    
+    // Validate: must be 0-12 (LSM6DS3 uses 20 bytes: 5 int32_t for roll, pitch, ground_angle, bottom_pressure, top_pressure)
+    // Values are stored as scaled integers: degrees * 10000, pressure * 1000
+    if (byte_start > 12) {
+        ESP_LOGW(TAG, "Invalid LSM6DS3 byte start %d found in NVS (max 12, uses 20 bytes), defaulting to 0", byte_start);
+        return 0;
+    }
+    
+    // LSM6DS3 byte start loaded silently (no console logging)
+    return byte_start;
+}
+
+bool system_lsm6ds3_byte_start_save(uint8_t byte_start)
+{
+    // Validate: LSM6DS3 uses 20 bytes (5 int32_t: roll, pitch, ground_angle, bottom_pressure, top_pressure)
+    // Values are stored as scaled integers: degrees * 10000, pressure * 1000
+    if (byte_start > 12) {
+        ESP_LOGE(TAG, "Invalid LSM6DS3 byte start %d (max 12, uses 20 bytes)", byte_start);
+        return false;
+    }
+    
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open NVS namespace: %s", esp_err_to_name(err));
+        return false;
+    }
+    
+    err = nvs_set_blob(handle, NVS_KEY_LSM6DS3_BYTE_START, &byte_start, sizeof(uint8_t));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save LSM6DS3 byte start: %s", esp_err_to_name(err));
+        nvs_close(handle);
+        return false;
+    }
+    
+    err = nvs_commit(handle);
+    nvs_close(handle);
+    
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to commit LSM6DS3 byte start: %s", esp_err_to_name(err));
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "LSM6DS3 byte start saved to NVS: %d", byte_start);
     return true;
 }
 

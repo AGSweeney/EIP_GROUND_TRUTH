@@ -17,5 +17,6 @@ idf_component_register(
         system_config
         ota_manager
         mpu6050
+        lsm6ds3
         log_buffer
 )
