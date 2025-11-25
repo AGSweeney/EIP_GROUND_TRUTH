@@ -264,5 +264,5 @@ See the main project `main/main.c` for complete integration example after enabli
 
 **Status**: Not included in build by default  
 **Version**: 1.0  
-**Last Updated**: 2024
+**Last Updated**: 2025
 

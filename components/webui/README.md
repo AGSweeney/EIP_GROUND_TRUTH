@@ -42,24 +42,40 @@ All API endpoints return JSON responses.
 
 ### Configuration Endpoints
 
-#### `GET /api/sensor/status`
+#### `GET /api/mpu6050/status`
 Get current MPU6050 sensor status and readings.
 
 **Response:**
 ```json
 {
+  "roll": 12.34,
+  "pitch": -5.67,
+  "ground_angle": 13.45,
+  "bottom_pressure": 123.4,
+  "top_pressure": 876.6,
   "enabled": true,
-  "angle_deg": 12.34,
-  "pressure1_psi": 123.4,
-  "pressure2_psi": 876.6,
-  "temperature_c": 25.5
+  "byte_offset": 0
 }
 ```
 
+#### `GET /api/lsm6ds3/status`
+Get current LSM6DS3 sensor status and readings (same format as MPU6050).
+
 ### Status Endpoints
 
-#### `GET /api/assemblies`
-Get EtherNet/IP assembly data.
+#### `GET /api/assemblies/sizes`
+Get EtherNet/IP assembly sizes.
+
+**Response:**
+```json
+{
+  "input_assembly_size": 32,
+  "output_assembly_size": 32
+}
+```
+
+#### `GET /api/status`
+Get assembly data for status pages (includes input and output assembly raw bytes).
 
 **Response:**
 ```json
@@ -146,7 +162,7 @@ Set Modbus TCP enabled state.
 
 ### Sensor Control Endpoints
 
-#### `GET /api/sensor/enabled`
+#### `GET /api/mpu6050/enabled` and `GET /api/lsm6ds3/enabled`
 Get sensor enabled state.
 
 **Response:**
@@ -156,8 +172,8 @@ Get sensor enabled state.
 }
 ```
 
-#### `POST /api/sensor/enabled`
-Enable or disable the VL53L1x sensor.
+#### `POST /api/mpu6050/enabled` and `POST /api/lsm6ds3/enabled`
+Enable or disable the sensor.
 
 **Request Body:**
 ```json
@@ -174,6 +190,69 @@ Enable or disable the VL53L1x sensor.
   "message": "Sensor state saved successfully"
 }
 ```
+
+#### `GET /api/mpu6050/byteoffset` and `GET /api/lsm6ds3/byteoffset`
+Get sensor data byte offset in Input Assembly 100.
+
+**Response:**
+```json
+{
+  "byte_offset": 0
+}
+```
+
+#### `POST /api/mpu6050/byteoffset` and `POST /api/lsm6ds3/byteoffset`
+Set sensor data byte offset (0-12, must leave 20 bytes free).
+
+**Request Body:**
+```json
+{
+  "byte_offset": 0
+}
+```
+
+#### `GET /api/lsm6ds3/calibrate`
+Get LSM6DS3 calibration status.
+
+**Response:**
+```json
+{
+  "calibrated": true,
+  "gyro_offset_mdps": [1.2, -0.5, 0.8]
+}
+```
+
+#### `POST /api/lsm6ds3/calibrate`
+Trigger LSM6DS3 calibration.
+
+**Request Body (optional):**
+```json
+{
+  "samples": 100,
+  "sample_delay_ms": 10
+}
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "message": "Calibration started"
+}
+```
+
+#### `GET /api/mpu6050/toolweight`, `GET /api/mpu6050/tipforce`, `GET /api/mpu6050/cylinderbore`
+Get tool weight, tip force, or cylinder bore configuration.
+
+**Response:**
+```json
+{
+  "tool_weight": 50
+}
+```
+
+#### `POST /api/mpu6050/toolweight`, `POST /api/mpu6050/tipforce`, `POST /api/mpu6050/cylinderbore`
+Set tool weight (0-255 lbs), tip force (0-255 lbs), or cylinder bore (0-255, scaled by 100: 0.01-2.55 inches).
 
 
 ### OTA Endpoints
@@ -209,6 +288,37 @@ Get OTA update status.
 
 ### System Endpoints
 
+#### `GET /api/logs`
+Get system logs from circular buffer.
+
+**Response:**
+```json
+{
+  "logs": "Log entry 1\nLog entry 2\n...",
+  "size": 1024
+}
+```
+
+#### `GET /api/i2c/pullup`
+Get I2C pull-up enabled state.
+
+**Response:**
+```json
+{
+  "enabled": true
+}
+```
+
+#### `POST /api/i2c/pullup`
+Set I2C pull-up enabled state.
+
+**Request Body:**
+```json
+{
+  "enabled": true
+}
+```
+
 #### `POST /api/reboot`
 Reboot the device.
 
@@ -231,11 +341,10 @@ Reboot the device.
 ### HTTP Server Configuration
 
 - **Port**: 80
-- **Max URI Handlers**: 25
+- **Max URI Handlers**: 35 (currently 34 handlers: 4 HTML pages + 30 API endpoints)
 - **Max Open Sockets**: 7
-- **Stack Size**: 16KB
+- **Stack Size**: 20KB (increased for large HTML pages and file uploads)
 - **Task Priority**: 5
-- **Core**: 1 (runs on same core as sensor task)
 - **Max Request Header Length**: 1024 bytes
 
 ### Data Storage

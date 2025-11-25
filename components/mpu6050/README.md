@@ -169,7 +169,7 @@ ESP_LOGI("MPU6050", "Roll: %.2f°, Pitch: %.2f°, Ground Angle: %.2f°",
          orientation.roll, orientation.pitch, orientation.abs_ground_angle);
 ```
 
-The absolute ground angle (`abs_ground_angle`) represents the total tilt angle relative to the horizontal plane, calculated as `sqrt(roll² + pitch²)`. This is useful for applications that need to know the overall tilt regardless of the direction.
+The absolute ground angle (`abs_ground_angle`) represents the angle from vertical, calculated using the correct 3D angle formula: `acos(cos(roll) × cos(pitch))`. This provides accurate tilt measurement regardless of roll/pitch direction and is mathematically correct for 3D orientation calculations.
 
 ### Custom Configuration
 

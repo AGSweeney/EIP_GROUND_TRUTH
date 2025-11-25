@@ -15,8 +15,9 @@ This project implements a full-featured EtherNet/IP adapter device on the ESP32-
   - Support for Exclusive Owner, Input Only, and Listen Only connections
 
 - **IMU Integration**: 6-axis motion sensor support (MPU6050 primary, LSM6DS3 fallback)
-  - Sensor fusion (complementary filter) for accurate orientation
-  - Roll, pitch, and ground angle from vertical calculation
+  - MPU6050: Accelerometer-based orientation calculation
+  - LSM6DS3: Sensor fusion (complementary filter) combining accelerometer and gyroscope for accurate orientation
+  - Roll, pitch, and ground angle from vertical calculation (both sensors)
   - Cylinder pressure calculations for opposed cylinders
   - Data mapped to Input Assembly 100 as 5 DINTs (20 bytes, configurable byte offset)
 

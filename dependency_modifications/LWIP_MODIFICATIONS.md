@@ -28,7 +28,7 @@ This document provides a comprehensive record of all modifications made to the L
 
 **Purpose**: Defines structure to hold pending IP configuration during RFC 5227 compliant deferred IP assignment.
 
-**Location**: `C:\Users\agswe\esp\v5.5.1\esp-idf\components\lwip\lwip\src\include\lwip\netif_pending_ip.h`
+**Location**: `components/lwip/lwip/src/include/lwip/netif_pending_ip.h` (local component override)
 
 **Key Contents**:
 - `struct netif_pending_ip_config` - Stores IP, netmask, gateway, ACD state, and callback
@@ -43,7 +43,7 @@ This document provides a comprehensive record of all modifications made to the L
 
 #### `lwip/src/include/lwip/opt.h`
 
-**File Path**: `C:\Users\agswe\esp\v5.5.1\esp-idf\components\lwip\lwip\src\include\lwip\opt.h`
+**File Path**: `components/lwip/lwip/src/include/lwip/opt.h` (local component override)
 
 **Changes Made**:
 
@@ -73,7 +73,7 @@ This document provides a comprehensive record of all modifications made to the L
 
 #### `lwip/src/include/lwip/netif.h`
 
-**File Path**: `C:\Users\agswe\esp\v5.5.1\esp-idf\components\lwip\lwip\src\include\lwip\netif.h`
+**File Path**: `components/lwip/lwip/src/include/lwip/netif.h` (local component override)
 
 **Changes Made**:
 
@@ -112,7 +112,7 @@ This document provides a comprehensive record of all modifications made to the L
 
 #### `lwip/src/include/lwip/acd.h`
 
-**File Path**: `C:\Users\agswe\esp\v5.5.1\esp-idf\components\lwip\lwip\src\include\lwip\acd.h`
+**File Path**: `components/lwip/lwip/src/include/lwip/acd.h` (local component override)
 
 **Changes Made**:
 
@@ -160,29 +160,35 @@ This document provides a comprehensive record of all modifications made to the L
    - Removes IP address when conflict detected for static IPs
    - Calls user callback with conflict state
 
-4. **Disabled ACD Diagnostic Logging**:
+4. **Fixed Self-Conflict Detection Bug** (in `acd_arp_reply()`):
+   - Added MAC address comparison to prevent false conflicts from looped-back ARP probes
+   - RFC 5227 Section 2.2.1 requires ignoring own packets - now properly implemented
+   - Probe conflict detection now requires both IP match AND differing sender MAC
+   - Prevents spurious probe sequence restarts when Ethernet MAC reflects own broadcasts
+
+5. **Disabled ACD Diagnostic Logging**:
    - Changed `ACD_DIAG` macro to no-op: `#define ACD_DIAG(fmt, ...) ((void)0)`
    - Modified `acd_log_mac()` to be a no-op to suppress unused variable warnings
    - Reduces log noise while keeping conflict detection logs
 
-5. **Active IP Defense Implementation**:
+6. **Active IP Defense Implementation**:
    - Added periodic defensive ARP probes in `ACD_STATE_ONGOING`
    - Defensive probes use source IP = 0.0.0.0 (matching Rockwell PLC behavior)
-   - Interval configurable via `CONFIG_OPENER_ACD_PERIODIC_DEFEND_INTERVAL_MS` (default: 90 seconds)
+   - Interval configurable via `CONFIG_OPENER_ACD_PERIODIC_DEFEND_INTERVAL_MS` (configured: 90000 ms = 90 seconds)
    - Implemented in `acd_tmr()` function
 
-6. **EtherNet/IP Conflict Reporting Integration**:
+7. **EtherNet/IP Conflict Reporting Integration**:
    - Added forward declarations for OpENer functions (`CipTcpIpSetLastAcdMac`, `CipTcpIpSetLastAcdRawData`)
    - Calls these functions at conflict detection points to populate EtherNet/IP Attribute #11
    - Captures MAC address and raw ARP frame data for diagnostic purposes
 
-7. **Natural State Machine Flow**:
+8. **Natural State Machine Flow**:
    - The ACD state machine naturally transitions: PROBE_WAIT → PROBING → ANNOUNCE_WAIT → ANNOUNCING → ONGOING
    - The `ACD_IP_OK` callback fires **after** the announce phase completes (when transitioning to ONGOING state)
    - The application (`main/main.c`) does not manually stop/restart ACD - it relies on the natural state machine transition
    - This ensures the probe sequence completes correctly without interference
 
-8. **Callback Tracking Fix** (in `main/main.c`):
+9. **Callback Tracking Fix** (in `main/main.c`):
    - Added `s_acd_callback_received` flag to distinguish between actual callback events and timeout conditions
    - Prevents false positive conflict detection when semaphore timeout occurs (probe sequence still running)
    - Timeout returns `true` (no conflict, waiting for callback) vs `false` (actual conflict detected)
@@ -195,7 +201,7 @@ This document provides a comprehensive record of all modifications made to the L
 
 #### `lwip/src/core/netif.c`
 
-**File Path**: `C:\Users\agswe\esp\v5.5.1\esp-idf\components\lwip\lwip\src\core\netif.c`
+**File Path**: `components/lwip/lwip/src/core/netif.c` (local component override)
 
 **Changes Made**:
 
@@ -232,22 +238,22 @@ This document provides a comprehensive record of all modifications made to the L
 
 #### `lwip/src/include/lwip/prot/acd.h`
 
-**File Path**: `C:\Users\agswe\esp\v5.5.1\esp-idf\components\lwip\lwip\src\include\lwip\prot\acd.h`
+**File Path**: `components/lwip/lwip/src/include/lwip/prot/acd.h` (local component override)
 
 **Changes Made**:
 
 1. **Made ACD Timing Constants Configurable** (around line 45-90):
    - Wrapped all timing constants with `#ifndef` guards
    - Allows override in `lwipopts.h` for protocol-specific requirements (e.g., EtherNet/IP)
-   - Constants made configurable:
-     - `PROBE_WAIT` (default: 1 second)
-     - `PROBE_MIN` (default: 1 second)
-     - `PROBE_MAX` (default: 2 seconds)
-     - `PROBE_NUM` (default: 3 packets)
-     - `ANNOUNCE_NUM` (default: 2 packets)
-     - `ANNOUNCE_INTERVAL` (default: 2 seconds)
-     - `ANNOUNCE_WAIT` (default: 2 seconds)
-     - `DEFEND_INTERVAL` (default: 10 seconds)
+   - Constants made configurable via ESP-IDF Kconfig (values are in milliseconds):
+     - `PROBE_WAIT` (configured: 200 ms via `CONFIG_OPENER_ACD_PROBE_WAIT_MS`)
+     - `PROBE_MIN` (configured: 200 ms via `CONFIG_OPENER_ACD_PROBE_MIN_MS`)
+     - `PROBE_MAX` (configured: 200 ms via `CONFIG_OPENER_ACD_PROBE_MAX_MS`)
+     - `PROBE_NUM` (configured: 3 packets via `CONFIG_OPENER_ACD_PROBE_NUM`)
+     - `ANNOUNCE_NUM` (configured: 4 packets via `CONFIG_OPENER_ACD_ANNOUNCE_NUM`)
+     - `ANNOUNCE_INTERVAL` (configured: 2000 ms via `CONFIG_OPENER_ACD_ANNOUNCE_INTERVAL_MS`)
+     - `ANNOUNCE_WAIT` (configured: 2000 ms via `CONFIG_OPENER_ACD_ANNOUNCE_WAIT_MS`)
+     - `DEFEND_INTERVAL` (configured: 90000 ms via `CONFIG_OPENER_ACD_PERIODIC_DEFEND_INTERVAL_MS`)
 
 **Rationale**: Enables EtherNet/IP and other protocols to override RFC 5227 default timings as needed.
 
@@ -255,7 +261,7 @@ This document provides a comprehensive record of all modifications made to the L
 
 #### `port/include/lwipopts.h`
 
-**File Path**: `C:\Users\agswe\esp\v5.5.1\esp-idf\components\lwip\port\include\lwipopts.h`
+**File Path**: `components/lwip/port/include/lwipopts.h` (local component override)
 
 **Changes Made**:
 
@@ -280,58 +286,58 @@ This document provides a comprehensive record of all modifications made to the L
 
 #### Socket and Connection Limits
 
-| Configuration | Default | Modified | Rationale |
-|--------------|---------|----------|-----------|
-| `CONFIG_LWIP_MAX_SOCKETS` | 32 | **64** | Increased for EtherNet/IP multiple connections |
-| `CONFIG_LWIP_MAX_ACTIVE_TCP` | 32 | **64** | Support more concurrent TCP connections |
+| Configuration | ESP-IDF Default | Modified | Rationale |
+|--------------|-----------------|----------|-----------|
+| `CONFIG_LWIP_MAX_SOCKETS` | 10 | **64** | Increased for EtherNet/IP multiple connections |
+| `CONFIG_LWIP_MAX_ACTIVE_TCP` | 16 | **64** | Support more concurrent TCP connections |
 | `CONFIG_LWIP_MAX_LISTENING_TCP` | 16 | **32** | More listening sockets for EtherNet/IP services |
-| `CONFIG_LWIP_MAX_UDP_PCBS` | 64 | **128** | Increased UDP support for EtherNet/IP messaging |
+| `CONFIG_LWIP_MAX_UDP_PCBS` | 16 | **128** | Increased UDP support for EtherNet/IP messaging |
 
 #### Buffer and Reassembly Settings
 
-| Configuration | Default | Modified | Rationale |
-|--------------|---------|----------|-----------|
+| Configuration | ESP-IDF Default | Modified | Rationale |
+|--------------|-----------------|----------|-----------|
 | `CONFIG_LWIP_IP_REASS_MAX_PBUFS` | 10 | **20** | More IP fragment reassembly buffers |
 | `CONFIG_LWIP_LOOPBACK_MAX_PBUFS` | 8 | **16** | Increased loopback buffer capacity |
 
 #### TCP Buffer Sizes
 
-| Configuration | Default | Modified | Rationale |
-|--------------|---------|----------|-----------|
-| `CONFIG_LWIP_TCP_SND_BUF_DEFAULT` | 16384 | **32768** | Larger send buffer for better throughput |
-| `CONFIG_LWIP_TCP_WND_DEFAULT` | 16384 | **32768** | Larger receive window for better performance |
+| Configuration | ESP-IDF Default | Modified | Rationale |
+|--------------|-----------------|----------|-----------|
+| `CONFIG_LWIP_TCP_SND_BUF_DEFAULT` | 5760 | **32768** | Larger send buffer for better throughput |
+| `CONFIG_LWIP_TCP_WND_DEFAULT` | 5760 | **32768** | Larger receive window for better performance |
 
 #### Mailbox Sizes
 
-| Configuration | Default | Modified | Rationale |
-|--------------|---------|----------|-----------|
+| Configuration | ESP-IDF Default | Modified | Rationale |
+|--------------|-----------------|----------|-----------|
 | `CONFIG_LWIP_TCPIP_RECVMBOX_SIZE` | 32 | **64** | Larger TCP/IP task mailbox for message handling |
-| `CONFIG_LWIP_TCP_RECVMBOX_SIZE` | 32 | **64** | TCP receive mailbox for better concurrency |
+| `CONFIG_LWIP_TCP_RECVMBOX_SIZE` | 6 | **64** | TCP receive mailbox for better concurrency |
 | `CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE` | 6 | **16** | More pending TCP accept connections |
-| `CONFIG_LWIP_UDP_RECVMBOX_SIZE` | 128 | **128** | Maintained (already at reasonable level) |
+| `CONFIG_LWIP_UDP_RECVMBOX_SIZE` | 6 | **128** | Increased UDP receive mailbox for EtherNet/IP messaging |
 | `CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS` | 4 | **12** | More out-of-sequence TCP packet buffers |
 
 #### Task Configuration
 
-| Configuration | Default | Modified | Rationale |
-|--------------|---------|----------|-----------|
-| `CONFIG_LWIP_TCPIP_TASK_STACK_SIZE` | 3072 → 6144 | **8192** | Increased stack for OpENer and ACD processing |
+| Configuration | ESP-IDF Default | Modified | Rationale |
+|--------------|-----------------|----------|-----------|
+| `CONFIG_LWIP_TCPIP_TASK_STACK_SIZE` | 3072 | **8192** | Increased stack for OpENer and ACD processing |
 | `CONFIG_LWIP_TCPIP_TASK_PRIO` | 18 | **12** | Adjusted priority for EtherNet/IP requirements |
 
 ### Task Affinity Configuration
 
-| Configuration | Default | Modified | Rationale |
-|--------------|---------|----------|-----------|
-| `CONFIG_LWIP_TCPIP_TASK_AFFINITY_NO_AFFINITY` | y | **n** | Disabled no-affinity mode |
-| `CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0` | n | **y** | Pin LWIP TCP/IP task to Core 0 |
-| `CONFIG_LWIP_TCPIP_TASK_AFFINITY` | 0x7FFFFFFF | **0x0** | Explicit Core 0 affinity |
+| Configuration | ESP-IDF Default | Modified | Rationale |
+|--------------|-----------------|----------|-----------|
+| `CONFIG_LWIP_TCPIP_TASK_AFFINITY_NO_AFFINITY` | y (default) | **n** | Disabled no-affinity mode |
+| `CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0` | n (default) | **y** | Pin LWIP TCP/IP task to Core 0 |
+| `CONFIG_LWIP_TCPIP_TASK_AFFINITY` | 0x7FFFFFFF (no affinity) | **0x0** | Explicit Core 0 affinity |
 
 **Rationale**: Pins LWIP TCP/IP task to Core 0, leaving Core 1 available for other hardware interfaces and OpENer processing.
 
 ### IRAM Optimization
 
-| Configuration | Default | Modified | Rationale |
-|--------------|---------|----------|-----------|
+| Configuration | ESP-IDF Default | Modified | Rationale |
+|--------------|-----------------|----------|-----------|
 | `CONFIG_LWIP_IRAM_OPTIMIZATION` | n | **y** | Places RX/TX functions in IRAM (~10KB) |
 | `CONFIG_LWIP_EXTRA_IRAM_OPTIMIZATION` | n | **y** | Places TCP functions in IRAM (~17KB) |
 
@@ -341,21 +347,21 @@ This document provides a comprehensive record of all modifications made to the L
 
 ### ACD and DHCP Configuration
 
-| Configuration | Default | Modified | Rationale |
-|--------------|---------|----------|-----------|
-| `CONFIG_LWIP_DHCP_DOES_ACD_CHECK` | n | **y** | Enable ACD checking for DHCP-assigned addresses |
-| `CONFIG_LWIP_AUTOIP` | y | **y** | Required for ACD support |
-| `CONFIG_LWIP_AUTOIP_MAX_CONFLICTS` | 10 | **9** | Slightly reduced for faster conflict detection |
+| Configuration | ESP-IDF Default | Modified | Rationale |
+|--------------|-----------------|----------|-----------|
+| `CONFIG_LWIP_DHCP_DOES_ACD_CHECK` | n (default: ARP check) | **y** | Enable ACD checking for DHCP-assigned addresses |
+| `CONFIG_LWIP_AUTOIP` | n | **y** | Required for ACD support |
+| `CONFIG_LWIP_AUTOIP_MAX_CONFLICTS` | 9 | **9** | No change (ESP-IDF default) |
 
 ### Other Configuration
 
-| Configuration | Default | Modified | Rationale |
-|--------------|---------|----------|-----------|
-| `CONFIG_LWIP_SO_REUSE` | n | **y** | Allow socket reuse for EtherNet/IP |
-| `CONFIG_LWIP_SO_REUSE_RXTOALL` | n | **y** | Receive broadcast/multicast on all sockets |
+| Configuration | ESP-IDF Default | Modified | Rationale |
+|--------------|-----------------|----------|-----------|
+| `CONFIG_LWIP_SO_REUSE` | y | **y** | No change (ESP-IDF default) |
+| `CONFIG_LWIP_SO_REUSE_RXTOALL` | y | **y** | No change (ESP-IDF default) |
 | `CONFIG_LWIP_STATS` | n | **y** | Enable statistics for debugging |
-| `CONFIG_LWIP_ESP_GRATUITOUS_ARP` | n | **y** | Send gratuitous ARP for better network compatibility |
-| `CONFIG_LWIP_NETIF_LOOPBACK` | y | **y** | Enable loopback interface |
+| `CONFIG_LWIP_ESP_GRATUITOUS_ARP` | y | **y** | No change (ESP-IDF default) |
+| `CONFIG_LWIP_NETIF_LOOPBACK` | y | **y** | No change (ESP-IDF default) |
 
 ---
 
@@ -387,35 +393,36 @@ This document provides a comprehensive record of all modifications made to the L
 
 ## ACD Timing Configuration
 
-### Default RFC 5227 Timings
+### Configured ACD Timings
 
-All ACD timing constants are now configurable via `lwipopts.h`. Default values (RFC 5227 compliant):
+All ACD timing constants are configurable via ESP-IDF Kconfig. Current configured values (optimized for EtherNet/IP):
 
-| Constant | Value | Unit | Description |
-|----------|-------|------|-------------|
-| `PROBE_WAIT` | 1 | second | Initial random delay before probing |
-| `PROBE_MIN` | 1 | second | Minimum delay between probe packets |
-| `PROBE_MAX` | 2 | seconds | Maximum delay between probe packets |
-| `PROBE_NUM` | 3 | packets | Number of probe packets to send |
-| `ANNOUNCE_WAIT` | 2 | seconds | Delay before announcing |
-| `ANNOUNCE_NUM` | 2 | packets | Number of announcement packets |
-| `ANNOUNCE_INTERVAL` | 2 | seconds | Time between announcement packets |
-| `DEFEND_INTERVAL` | 10 | seconds | Minimum interval between defensive ARPs |
+| Constant | Value (ms) | Equivalent | Description |
+|----------|------------|------------|-------------|
+| `PROBE_WAIT` | 200 | 0.2 seconds | Initial random delay before probing (`CONFIG_OPENER_ACD_PROBE_WAIT_MS`) |
+| `PROBE_MIN` | 200 | 0.2 seconds | Minimum delay between probe packets (`CONFIG_OPENER_ACD_PROBE_MIN_MS`) |
+| `PROBE_MAX` | 200 | 0.2 seconds | Maximum delay between probe packets (`CONFIG_OPENER_ACD_PROBE_MAX_MS`) |
+| `PROBE_NUM` | 3 | packets | Number of probe packets to send (`CONFIG_OPENER_ACD_PROBE_NUM`) |
+| `ANNOUNCE_WAIT` | 2000 | 2 seconds | Delay before announcing (`CONFIG_OPENER_ACD_ANNOUNCE_WAIT_MS`) |
+| `ANNOUNCE_NUM` | 4 | packets | Number of announcement packets (`CONFIG_OPENER_ACD_ANNOUNCE_NUM`) |
+| `ANNOUNCE_INTERVAL` | 2000 | 2 seconds | Time between announcement packets (`CONFIG_OPENER_ACD_ANNOUNCE_INTERVAL_MS`) |
+| `DEFEND_INTERVAL` | 90000 | 90 seconds | Minimum interval between defensive ARPs (`CONFIG_OPENER_ACD_PERIODIC_DEFEND_INTERVAL_MS`) |
 
-### Override Example for EtherNet/IP
+**Note**: These values are optimized for EtherNet/IP and differ from RFC 5227 defaults (which use 1000 ms for probe intervals and 2 packets for announcements).
 
-To override timings in `lwipopts.h`:
+### Configuration via ESP-IDF Kconfig
 
-```c
-/* EtherNet/IP specific ACD timings */
-#define PROBE_WAIT           0   /* Override RFC 5227 default */
-#define PROBE_MIN            0
-#define PROBE_MAX            1
-#define PROBE_NUM            2
-/* ... etc */
-```
+Timing values are configured via ESP-IDF Kconfig options (accessible via `idf.py menuconfig` under "OpENer Configuration" → "ACD Configuration"). Values are specified in milliseconds.
 
-**Rationale**: EtherNet/IP may require different timing values than RFC 5227 defaults. Making these configurable allows protocol-specific optimization without modifying core LWIP code.
+**Current Configuration**:
+- Probe intervals: 200 ms (faster than RFC 5227 default of 1000 ms)
+- Announcements: 4 packets (more than RFC 5227 default of 2 packets)
+- Defend interval: 90 seconds (longer than RFC 5227 default of 10 seconds)
+
+**Rationale**: These values are optimized for EtherNet/IP requirements:
+- Faster probe intervals (200 ms) reduce IP assignment time
+- More announcements (4 packets) improve network visibility
+- Longer defend interval (90 seconds) matches Rockwell PLC behavior and reduces network traffic
 
 ---
 
@@ -474,22 +481,34 @@ BaseType_t result = xTaskCreatePinnedToCore(opener_thread,
 
 ### Configuration Summary
 
-#### Performance Increases
+#### Performance Increases (ESP-IDF Default → Configured)
 
-- **Sockets**: 32 → 64 (+100%)
-- **Active TCP**: 32 → 64 (+100%)
-- **Listening TCP**: 16 → 32 (+100%)
-- **UDP PCBs**: 64 → 128 (+100%)
-- **TCP Send Buffer**: 16KB → 32KB (+100%)
-- **TCP Window**: 16KB → 32KB (+100%)
-- **TCP/IP Stack**: 3072 → 8192 bytes (+167%)
+| Configuration | ESP-IDF Default | Configured | Increase |
+|---------------|-----------------|------------|----------|
+| **Sockets** (`CONFIG_LWIP_MAX_SOCKETS`) | 10 | 64 | +540% |
+| **Active TCP** (`CONFIG_LWIP_MAX_ACTIVE_TCP`) | 16 | 64 | +300% |
+| **Listening TCP** (`CONFIG_LWIP_MAX_LISTENING_TCP`) | 16 | 32 | +100% |
+| **UDP PCBs** (`CONFIG_LWIP_MAX_UDP_PCBS`) | 16 | 128 | +700% |
+| **TCP Send Buffer** (`CONFIG_LWIP_TCP_SND_BUF_DEFAULT`) | 5760 bytes | 32768 bytes | +469% |
+| **TCP Window** (`CONFIG_LWIP_TCP_WND_DEFAULT`) | 5760 bytes | 32768 bytes | +469% |
+| **TCP/IP Stack** (`CONFIG_LWIP_TCPIP_TASK_STACK_SIZE`) | 3072 bytes | 8192 bytes | +167% |
 
-#### Mailbox Increases
+#### Mailbox Increases (ESP-IDF Default → Configured)
 
-- **TCP/IP Recv**: 32 → 64 (+100%)
-- **TCP Recv**: 32 → 64 (+100%)
-- **TCP Accept**: 6 → 16 (+167%)
-- **TCP OOSEQ**: 4 → 12 (+200%)
+| Configuration | ESP-IDF Default | Configured | Increase |
+|---------------|-----------------|------------|----------|
+| **TCP/IP Recv** (`CONFIG_LWIP_TCPIP_RECVMBOX_SIZE`) | 32 | 64 | +100% |
+| **TCP Recv** (`CONFIG_LWIP_TCP_RECVMBOX_SIZE`) | 6 | 64 | +967% |
+| **TCP Accept** (`CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE`) | 6 | 16 | +167% |
+| **UDP Recv** (`CONFIG_LWIP_UDP_RECVMBOX_SIZE`) | 6 | 128 | +2033% |
+| **TCP OOSEQ** (`CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS`) | 4 | 12 | +200% |
+
+#### Buffer Increases (ESP-IDF Default → Configured)
+
+| Configuration | ESP-IDF Default | Configured | Increase |
+|---------------|-----------------|------------|----------|
+| **IP Reassembly** (`CONFIG_LWIP_IP_REASS_MAX_PBUFS`) | 10 | 20 | +100% |
+| **Loopback** (`CONFIG_LWIP_LOOPBACK_MAX_PBUFS`) | 8 | 16 | +100% |
 
 #### New Features
 
@@ -545,10 +564,8 @@ grep "FD_SETSIZE" build/config/sdkconfig.h
 ## References
 
 - **RFC 5227**: IPv4 Address Conflict Detection - https://tools.ietf.org/html/rfc5227
-- **Implementation Guide**: `dependency_modifications/lwIP/RFC5227_IMPLEMENTATION_GUIDE.md`
-- **ACD Testing Guide**: `ReadmeACD.md`
-- **ACD Static IP Issue**: `dependency_modifications/lwIP/acd-static-ip-issue.md`
-- **RFC 5227 Requirements**: `dependency_modifications/Analysis_of_ACD_Issue/RFC5227_COMPLIANCE_REQUIREMENTS.md`
+- **EtherNet/IP Conflict Reporting**: See `docs/ACD_CONFLICT_REPORTING.md` for implementation details
+- **ACD Testing Guide**: `ReadmeACD.md` (if present)
 
 ---
 
@@ -564,13 +581,17 @@ When upgrading ESP-IDF, these modifications will need to be reapplied:
 
 ### Recommended Approach
 
-1. Keep a patch file or script to reapply LWIP modifications
-2. Document any ESP-IDF version-specific changes
-3. Test thoroughly after ESP-IDF upgrades
+1. **Component Override**: Current approach uses `components/lwip/` local override
+   - Modifications persist across ESP-IDF updates
+   - No need to reapply patches to ESP-IDF installation
+   - All modifications are documented in this file
+2. **Version Compatibility**: Document any ESP-IDF version-specific changes
+3. **Testing**: Test thoroughly after ESP-IDF upgrades
+4. **Manual Reapplication**: When upgrading ESP-IDF, manually reapply modifications by following the code changes documented in this file
 
 ---
 
 **Document Version**: 1.0  
-**Last Updated**: 2024  
+**Last Updated**: 2025  
 **Project**: ESP32-P4 OpENer EtherNet/IP Stack
 
