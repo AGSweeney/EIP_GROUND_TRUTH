@@ -22,93 +22,7 @@ This document provides a comprehensive record of all modifications made to the L
 
 ## LWIP Source Code Modifications
 
-### 1. New Files Created
-
-#### `lwip/src/include/lwip/netif_pending_ip.h` (NEW FILE)
-
-**Purpose**: Defines structure to hold pending IP configuration during RFC 5227 compliant deferred IP assignment.
-
-**Location**: `components/lwip/lwip/src/include/lwip/netif_pending_ip.h` (local component override)
-
-**Key Contents**:
-- `struct netif_pending_ip_config` - Stores IP, netmask, gateway, ACD state, and callback
-- Forward declarations to avoid circular dependencies
-- Conditional compilation based on `LWIP_ACD_RFC5227_COMPLIANT_STATIC`
-
-**Rationale**: Required for RFC 5227 compliance to defer IP assignment until ACD confirms safety.
-
----
-
-### 2. Modified Files
-
-#### `lwip/src/include/lwip/opt.h`
-
-**File Path**: `components/lwip/lwip/src/include/lwip/opt.h` (local component override)
-
-**Changes Made**:
-
-1. **Added RFC 5227 Compliance Option** (around line 1058-1073):
-   ```c
-   /**
-    * LWIP_ACD_RFC5227_COMPLIANT_STATIC==1: Enable RFC 5227 compliant static IP assignment.
-    * When enabled, netif_set_addr() will defer IP assignment until ACD confirms safety.
-    * IP address is NOT assigned until ACD_IP_OK callback is received.
-    * If conflict is detected, IP is not assigned (or removed if already assigned).
-    * 
-    * This requires LWIP_ACD to be enabled.
-    * Default: 1 (enabled) for RFC 5227 compliance
-    */
-   #ifndef LWIP_ACD_RFC5227_COMPLIANT_STATIC
-   #define LWIP_ACD_RFC5227_COMPLIANT_STATIC   1
-   #endif
-   #if !LWIP_ACD
-   #undef LWIP_ACD_RFC5227_COMPLIANT_STATIC
-   #define LWIP_ACD_RFC5227_COMPLIANT_STATIC   0
-   #endif
-   ```
-
-**Rationale**: Enables RFC 5227 compliant static IP assignment by default, ensuring IP addresses are not assigned until ACD confirms they are safe.
-
----
-
-#### `lwip/src/include/lwip/netif.h`
-
-**File Path**: `components/lwip/lwip/src/include/lwip/netif.h` (local component override)
-
-**Changes Made**:
-
-1. **Added Forward Declaration** (around line 52-66):
-   ```c
-   #if LWIP_ACD && LWIP_ACD_RFC5227_COMPLIANT_STATIC
-   /* Forward declare to avoid circular dependency */
-   struct netif_pending_ip_config;
-   /* Forward declare callback type needed for netif_set_addr_with_acd */
-   #include "lwip/prot/acd.h"
-   typedef void (*acd_conflict_callback_t)(struct netif *netif, acd_callback_enum_t state);
-   #endif
-   ```
-
-2. **Added Field to struct netif** (around line 401-406):
-   ```c
-   #if LWIP_ACD && LWIP_ACD_RFC5227_COMPLIANT_STATIC
-     struct netif_pending_ip_config *pending_ip_config;
-   #endif /* LWIP_ACD && LWIP_ACD_RFC5227_COMPLIANT_STATIC */
-   ```
-
-3. **Added Function Declaration** (around line 458-463):
-   ```c
-   #if LWIP_ACD && LWIP_ACD_RFC5227_COMPLIANT_STATIC
-   err_t netif_set_addr_with_acd(struct netif *netif,
-                                  const ip4_addr_t *ipaddr,
-                                  const ip4_addr_t *netmask,
-                                  const ip4_addr_t *gw,
-                                  acd_conflict_callback_t callback);
-   #endif
-   ```
-
-**Rationale**: Provides API for RFC 5227 compliant static IP assignment and stores pending configuration.
-
----
+### Modified Files
 
 #### `lwip/src/include/lwip/acd.h`
 
@@ -122,16 +36,9 @@ This document provides a comprehensive record of all modifications made to the L
    struct etharp_hdr;
    ```
 
-2. **Added RFC 5227 Callback Declaration** (around line 58-59):
-   ```c
-   #if LWIP_ACD_RFC5227_COMPLIANT_STATIC
-   void acd_static_ip_rfc5227_callback(struct netif *netif, acd_callback_enum_t state);
-   #endif
-   ```
+2. **Removed Direct Include of etharp.h**: Replaced with forward declaration to break circular dependency.
 
-3. **Removed Direct Include of etharp.h**: Replaced with forward declaration to break circular dependency.
-
-**Rationale**: Breaks circular dependencies and exposes RFC 5227 callback function.
+**Rationale**: Breaks circular dependencies.
 
 ---
 
@@ -144,51 +51,42 @@ This document provides a comprehensive record of all modifications made to the L
 1. **Added Includes** (around line 73-78):
    ```c
    #include "lwip/etharp.h"  /* Need full definition of struct etharp_hdr for acd_arp_reply */
-   #if LWIP_ACD_RFC5227_COMPLIANT_STATIC
-   #include "lwip/netif_pending_ip.h"
-   #include "lwip/netif.h"
-   #include "lwip/mem.h"
-   #endif
    ```
 
-2. **Implemented RFC 5227 Callback Function** (around line 112-181):
-   - `acd_static_ip_rfc5227_callback()` - Assigns IP only after `ACD_IP_OK`, removes IP on conflict
-   - Made function non-static and declared in `acd.h`
-
-3. **Modified Conflict Handling** (in `acd_handle_arp_conflict()`):
+2. **Modified Conflict Handling** (in `acd_handle_arp_conflict()`):
    - Added RFC 5227 compliant conflict detection
    - Removes IP address when conflict detected for static IPs
    - Calls user callback with conflict state
 
-4. **Fixed Self-Conflict Detection Bug** (in `acd_arp_reply()`):
+3. **Fixed Self-Conflict Detection Bug** (in `acd_arp_reply()`):
    - Added MAC address comparison to prevent false conflicts from looped-back ARP probes
    - RFC 5227 Section 2.2.1 requires ignoring own packets - now properly implemented
    - Probe conflict detection now requires both IP match AND differing sender MAC
    - Prevents spurious probe sequence restarts when Ethernet MAC reflects own broadcasts
 
-5. **Disabled ACD Diagnostic Logging**:
+4. **Disabled ACD Diagnostic Logging**:
    - Changed `ACD_DIAG` macro to no-op: `#define ACD_DIAG(fmt, ...) ((void)0)`
    - Modified `acd_log_mac()` to be a no-op to suppress unused variable warnings
    - Reduces log noise while keeping conflict detection logs
 
-6. **Active IP Defense Implementation**:
+5. **Active IP Defense Implementation**:
    - Added periodic defensive ARP probes in `ACD_STATE_ONGOING`
    - Defensive probes use source IP = 0.0.0.0 (matching Rockwell PLC behavior)
    - Interval configurable via `CONFIG_OPENER_ACD_PERIODIC_DEFEND_INTERVAL_MS` (configured: 90000 ms = 90 seconds)
    - Implemented in `acd_tmr()` function
 
-7. **EtherNet/IP Conflict Reporting Integration**:
+6. **EtherNet/IP Conflict Reporting Integration**:
    - Added forward declarations for OpENer functions (`CipTcpIpSetLastAcdMac`, `CipTcpIpSetLastAcdRawData`)
    - Calls these functions at conflict detection points to populate EtherNet/IP Attribute #11
    - Captures MAC address and raw ARP frame data for diagnostic purposes
 
-8. **Natural State Machine Flow**:
+7. **Natural State Machine Flow**:
    - The ACD state machine naturally transitions: PROBE_WAIT → PROBING → ANNOUNCE_WAIT → ANNOUNCING → ONGOING
    - The `ACD_IP_OK` callback fires **after** the announce phase completes (when transitioning to ONGOING state)
    - The application (`main/main.c`) does not manually stop/restart ACD - it relies on the natural state machine transition
    - This ensures the probe sequence completes correctly without interference
 
-9. **Callback Tracking Fix** (in `main/main.c`):
+8. **Callback Tracking Fix** (in `main/main.c`):
    - Added `s_acd_callback_received` flag to distinguish between actual callback events and timeout conditions
    - Prevents false positive conflict detection when semaphore timeout occurs (probe sequence still running)
    - Timeout returns `true` (no conflict, waiting for callback) vs `false` (actual conflict detected)
@@ -205,34 +103,14 @@ This document provides a comprehensive record of all modifications made to the L
 
 **Changes Made**:
 
-1. **Added Includes** (around line 70-75):
+1. **Added ACD Include** (around line 83-85):
    ```c
    #if LWIP_ACD
    #include "lwip/acd.h"
-   #if LWIP_ACD_RFC5227_COMPLIANT_STATIC
-   #include "lwip/netif_pending_ip.h"
-   #endif
    #endif /* LWIP_ACD */
    ```
 
-2. **Implemented `netif_set_addr_with_acd()` Function** (around line 500-600):
-   - New API function for RFC 5227 compliant static IP assignment
-   - Starts ACD BEFORE assigning IP (RFC 5227 compliant)
-   - Defers IP assignment until `ACD_IP_OK` callback
-
-3. **Added Cleanup in `netif_remove()`** (around line 200-400):
-   ```c
-   #if LWIP_ACD && LWIP_ACD_RFC5227_COMPLIANT_STATIC
-     /* Clean up pending IP configuration if present */
-     if (netif->pending_ip_config != NULL) {
-       acd_remove(netif, &netif->pending_ip_config->acd);
-       mem_free(netif->pending_ip_config);
-       netif->pending_ip_config = NULL;
-     }
-   #endif
-   ```
-
-**Rationale**: Provides RFC 5227 compliant API and ensures proper cleanup of pending configurations.
+**Rationale**: Enables ACD functionality in netif module.
 
 ---
 
@@ -470,14 +348,11 @@ BaseType_t result = xTaskCreatePinnedToCore(opener_thread,
 
 ### Files Modified in LWIP Source Tree
 
-1. ✅ **NEW**: `lwip/src/include/lwip/netif_pending_ip.h`
-2. ✅ **MODIFIED**: `lwip/src/include/lwip/opt.h`
-3. ✅ **MODIFIED**: `lwip/src/include/lwip/netif.h`
-4. ✅ **MODIFIED**: `lwip/src/include/lwip/acd.h`
-5. ✅ **MODIFIED**: `lwip/src/core/ipv4/acd.c`
-6. ✅ **MODIFIED**: `lwip/src/core/netif.c`
-7. ✅ **MODIFIED**: `lwip/src/include/lwip/prot/acd.h`
-8. ✅ **MODIFIED**: `port/include/lwipopts.h`
+1. ✅ **MODIFIED**: `lwip/src/include/lwip/acd.h`
+2. ✅ **MODIFIED**: `lwip/src/core/ipv4/acd.c`
+3. ✅ **MODIFIED**: `lwip/src/core/netif.c`
+4. ✅ **MODIFIED**: `lwip/src/include/lwip/prot/acd.h`
+5. ✅ **MODIFIED**: `port/include/lwipopts.h`
 
 ### Configuration Summary
 
@@ -512,7 +387,6 @@ BaseType_t result = xTaskCreatePinnedToCore(opener_thread,
 
 #### New Features
 
-- ✅ RFC 5227 compliant static IP assignment
 - ✅ Configurable ACD timings
 - ✅ Task affinity control (Core 0)
 - ✅ IRAM optimization enabled
@@ -528,8 +402,6 @@ BaseType_t result = xTaskCreatePinnedToCore(opener_thread,
 ### Backward Compatibility
 
 - ✅ All changes are backward compatible
-- ✅ RFC 5227 mode can be disabled via `LWIP_ACD_RFC5227_COMPLIANT_STATIC=0`
-- ✅ Legacy `netif_set_addr()` still works when RFC 5227 mode disabled
 - ✅ ACD timing overrides are optional
 
 ---
@@ -540,7 +412,6 @@ BaseType_t result = xTaskCreatePinnedToCore(opener_thread,
 
 1. **FD_SETSIZE Check**: Build should complete without static assertion errors
 2. **ACD Compilation**: Verify `LWIP_ACD=1` in build output
-3. **RFC 5227 Mode**: Verify `LWIP_ACD_RFC5227_COMPLIANT_STATIC=1` in build
 
 ### Runtime Verification
 
