@@ -346,7 +346,7 @@ The implementation uses a callback tracking mechanism to prevent false positive 
 
 - **RFC 5227**: IPv4 Address Conflict Detection - https://tools.ietf.org/html/rfc5227
 - **EtherNet/IP Specification**: TCP/IP Interface Object (Class 0xF5), Attribute #11
-- **Implementation Details**: See `dependency_modifications/lwIP/ACD_ARP_FRAME_STORAGE_ISSUE.md` (design document)
+- **Implementation Details**: ARP frame storage implementation is documented in this document (see "Conflict Data Capture" and "EtherNet/IP Attribute #11 Storage" sections above)
 - **Wireshark Filters**: See `docs/WIRESHARK_FILTERS.md` for debugging ACD conflicts
 
 ---
