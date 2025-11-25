@@ -24,12 +24,10 @@ This project implements a full-featured EtherNet/IP adapter device on the ESP32-
   - Input Registers 0-15 map to Input Assembly 100
   - Holding Registers 100-115 map to Output Assembly 150
 
-- **Web-Based Configuration Interface**: Comprehensive HTTP-based management
+- **Web-Based Configuration Interface**: Essential device management
   - Network configuration (DHCP/Static IP)
-  - Sensor configuration and calibration
-  - Real-time assembly data monitoring
   - Firmware updates via OTA
-  - System logs viewing
+  - All other configuration and monitoring available via REST API
 
 - **OTA Firmware Updates**: Over-the-air firmware update capability
   - File upload via web interface
@@ -53,7 +51,7 @@ This project implements a full-featured EtherNet/IP adapter device on the ESP32-
 
 - **Microcontroller**: ESP32-P4
 - **Ethernet PHY**: IP101 (or compatible)
-- **I2C Devices**: Optional MPU6050 IMU sensor
+- **I2C Devices**: Optional IMU sensor (MPU6050 or LSM6DS3)
 - **GPIO Configuration**:
   - Ethernet: MDC, MDIO, PHY Reset (configurable)
   - I2C: SDA, SCL (configurable, defaults GPIO7/GPIO8)
@@ -72,6 +70,7 @@ EIP_GROUND_TRUTH/
 ├── components/              # Custom components
 │   ├── opener/             # OpENer EtherNet/IP stack
 │   ├── mpu6050/            # MPU6050 IMU driver
+│   ├── lsm6ds3/            # LSM6DS3 IMU driver (fallback)
 │   ├── modbus_tcp/         # Modbus TCP server
 │   ├── webui/              # Web interface
 │   ├── ota_manager/        # OTA update manager
@@ -98,7 +97,7 @@ EIP_GROUND_TRUTH/
 1. **Install ESP-IDF v5.5.1**:
    ```bash
    # Follow ESP-IDF installation guide
-   # https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/get-started/
+   # https://docs.espressif.com/projects/esp-idf/en/latest/esp32p4/get-started/
    ```
 
 2. **Clone the repository**:
@@ -151,22 +150,25 @@ Configuration can be done via:
 
 ### Sensor Configuration
 
-#### MPU6050 IMU
+#### IMU Sensors (MPU6050 or LSM6DS3)
 
-The MPU6050 provides orientation data:
-- **Fused Angle**: Sensor fusion of accelerometer and gyroscope data (degrees from vertical)
-- **Cylinder Pressures**: Calculated pressures for two opposed cylinders based on angle
-- **Temperature**: Internal sensor temperature
+The device automatically detects and uses MPU6050 if available, otherwise falls back to LSM6DS3. Both sensors provide:
+- **Roll and Pitch**: Orientation angles from horizontal (degrees)
+- **Ground Angle**: Angle from vertical (degrees)
+- **Cylinder Pressures**: Calculated pressures for two opposed cylinders based on orientation, tool weight, tip force, and cylinder bore
 
-The sensor data is mapped to Input Assembly 100:
-- **DINT 0**: Fused angle (degrees * 100 for 2 decimal places)
-- **DINT 1**: Cylinder 1 pressure (PSI * 10 for 1 decimal place)
-- **DINT 2**: Cylinder 2 pressure (PSI * 10 for 1 decimal place)
-- **DINT 3**: MPU6050 temperature (Celsius * 100 for 2 decimal places)
+The sensor data is mapped to Input Assembly 100 (20 bytes, configurable byte offset):
+- **DINT 0**: Roll angle (degrees × 10000)
+- **DINT 1**: Pitch angle (degrees × 10000)
+- **DINT 2**: Ground angle from vertical (degrees × 10000)
+- **DINT 3**: Bottom cylinder pressure (PSI × 1000)
+- **DINT 4**: Top cylinder pressure (PSI × 1000)
 
 Configuration via web API:
 - Enable/disable sensor
-- View real-time readings
+- Configure byte offset (0-12) to avoid conflicts with other sensors
+- View real-time readings (roll, pitch, ground angle, pressures)
+- Calibrate sensor (LSM6DS3 only)
 
 
 ### EtherNet/IP Configuration
@@ -203,15 +205,14 @@ Access the web interface at `http://<device-ip>/` after the device has obtained 
 
 ### Features
 
-- **Network Configuration**: Set IP address, netmask, gateway, DNS
-- **Sensor Status**: Real-time IMU sensor readings and configuration (MPU6050 or LSM6DS3)
-- **Assembly Monitoring**: View Input/Output assembly data with bit-level visualization
-- **Modbus TCP**: Enable/disable Modbus TCP server
-- **OTA Updates**: Upload firmware updates via web browser
-- **System Logs**: View recent system logs (32KB buffer)
-- **I2C Bus Scan**: View detected I2C devices
+The web interface provides essential device management capabilities:
 
-For detailed API documentation, see [docs/API_Endpoints.md](docs/API_Endpoints.md).
+- **Network Configuration**: Set IP address, netmask, gateway, DNS (DHCP/Static IP modes)
+- **Firmware Updates**: Upload firmware updates via web browser (OTA)
+
+**Note:** All other device configuration, monitoring, and status information is available via the REST API. The web interface is intentionally minimal to keep it lightweight and focused on essential functions.
+
+For detailed API documentation covering sensor configuration, assembly monitoring, Modbus TCP control, system logs, and more, see [docs/API_Endpoints.md](docs/API_Endpoints.md).
 
 ## Modbus TCP Mapping
 
@@ -314,9 +315,12 @@ This project includes a modified version of lwIP from ESP-IDF v5.5.1. The lwIP m
 ### Sensor Not Detected
 
 1. Run I2C bus scan via web interface
-2. Verify I2C address (MPU6050: 0x68 or 0x69)
-3. Check pull-up resistors (internal vs external)
+2. Verify I2C address:
+   - MPU6050: 0x68 (default) or 0x69 (if AD0 pin is high)
+   - LSM6DS3: 0x6A (default) or 0x6B (if SDO pin is high)
+3. Check pull-up resistors (internal vs external, configurable via API)
 4. Review serial logs for I2C errors
+5. The device will automatically try LSM6DS3 if MPU6050 is not detected
 
 ### OTA Update Fails
 
@@ -333,6 +337,7 @@ This project includes a modified version of lwIP from ESP-IDF v5.5.1. The lwIP m
 - [Modbus TCP/IP Specification](https://modbus.org/specs.php)
 - [RFC 5227 - IPv4 Address Conflict Detection](https://tools.ietf.org/html/rfc5227)
 - [MPU6050 Datasheet](https://www.invensense.com/products/motion-tracking/6-axis/mpu-6050/)
+- [LSM6DS3 Datasheet](https://www.st.com/resource/en/datasheet/lsm6ds3.pdf)
 
 ## Documentation
 

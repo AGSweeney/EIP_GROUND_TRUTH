@@ -32,7 +32,7 @@
 // Forward declarations for HTML content functions
 const char *webui_get_index_html(void);
 const char *webui_get_ota_html(void);
-const char *webui_get_mpu6050_status_html(void);
+// Removed - use API instead
 
 static const char *TAG = "webui";
 static httpd_handle_t server_handle = NULL;
@@ -116,14 +116,7 @@ static esp_err_t ota_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-static esp_err_t mpu6050_status_handler(httpd_req_t *req)
-{
-    const char *html = webui_get_mpu6050_status_html();
-    size_t html_len = strlen(html);
-    httpd_resp_set_type(req, "text/html");
-    httpd_resp_send(req, html, html_len);
-    return ESP_OK;
-}
+// Removed - use API instead
 
 static esp_err_t favicon_handler(httpd_req_t *req)
 {
@@ -147,12 +140,7 @@ static const httpd_uri_t ota_uri = {
     .user_ctx  = NULL
 };
 
-static const httpd_uri_t mpu6050_status_uri = {
-    .uri       = "/mpu6050status",
-    .method    = HTTP_GET,
-    .handler   = mpu6050_status_handler,
-    .user_ctx  = NULL
-};
+// Removed - use API instead
 
 static const httpd_uri_t favicon_uri = {
     .uri       = "/favicon.ico",
@@ -190,7 +178,6 @@ bool webui_init(void)
         // Register URI handlers
         httpd_register_uri_handler(server_handle, &root_uri);
         httpd_register_uri_handler(server_handle, &ota_uri);
-        httpd_register_uri_handler(server_handle, &mpu6050_status_uri);
         httpd_register_uri_handler(server_handle, &favicon_uri);
         
         // Register API handlers

@@ -1,70 +1,30 @@
 # Web UI Component
 
-A comprehensive web-based user interface for the ESP32-P4 OpENer EtherNet/IP adapter, providing real-time sensor monitoring, configuration management, and firmware updates.
+A minimal web-based user interface for the ESP32-P4 OpENer EtherNet/IP adapter, providing essential device management capabilities.
 
 ## Overview
 
-The Web UI component provides a modern, responsive web interface accessible via HTTP on port 80. It offers complete device configuration, real-time sensor data visualization, EtherNet/IP assembly monitoring, and over-the-air (OTA) firmware update capabilities.
+The Web UI component provides a lightweight, responsive web interface accessible via HTTP on port 80. It focuses on essential functions: network configuration and firmware updates. All other device configuration, monitoring, and status information is available via the REST API.
 
 ## Features
 
 - **Network Configuration**: Configure DHCP/Static IP, netmask, gateway, and DNS settings
-- **MPU6050 Sensor Configuration**: Enable/disable sensor and view real-time readings
-- **Real-time Sensor Monitoring**: Live orientation and pressure data
-- **EtherNet/IP Assembly Monitoring**: Bit-level visualization of Input and Output assemblies
-- **Modbus TCP Configuration**: Enable/disable Modbus TCP server
 - **OTA Firmware Updates**: Upload and install firmware updates via web interface
+- **REST API**: All sensor configuration, monitoring, and advanced features available via API endpoints
 - **Responsive Design**: Works on desktop and mobile devices
 - **No External Dependencies**: All CSS and JavaScript is self-contained (no CDN)
 
 ## Web Pages
 
 ### Configuration Page (`/`)
-The main configuration page provides access to all device settings:
+The main configuration page provides essential device management:
 
 - **Network Configuration Card**
   - DHCP/Static IP mode selection
   - IP address, netmask, gateway configuration
   - DNS server configuration (hidden when using DHCP)
   - All settings stored in OpENer's NVS
-
-- **Modbus TCP Card**
-  - Enable/disable Modbus TCP server
-  - Information about Modbus data mapping
-  - Settings persist across reboots
-
-- **MPU6050 Sensor Configuration Card**
-  - Enable/disable sensor
-  - View sensor status and readings
-
-### MPU6050 Status Page (`/mpu6050`)
-Real-time sensor monitoring dashboard:
-
-- **Sensor Readings**
-  - Fused angle from vertical (degrees)
-  - Cylinder 1 pressure (PSI)
-  - Cylinder 2 pressure (PSI)
-  - Temperature (Celsius)
-
-- **Updates every 250ms**
-
-### Input Assembly Page (`/inputassembly`)
-Bit-level visualization of EtherNet/IP Input Assembly 100:
-
-- 32 bytes displayed individually
-- Each byte shows: `Byte X HEX (0xYY) | DEC ZZZ`
-- Individual bit checkboxes (read-only)
-- Blue checkboxes with white checkmarks when active
-- Auto-refresh every 250ms
-
-### Output Assembly Page (`/outputassembly`)
-Bit-level visualization of EtherNet/IP Output Assembly 150:
-
-- 32 bytes displayed individually
-- Each byte shows: `Byte X HEX (0xYY) | DEC ZZZ`
-- Individual bit checkboxes (read-only)
-- Blue checkboxes with white checkmarks when active
-- Auto-refresh every 250ms
+  - Reboot required to apply network changes
 
 ### Firmware Update Page (`/ota`)
 Over-the-air firmware update interface:
@@ -73,6 +33,8 @@ Over-the-air firmware update interface:
 - Progress indication
 - Auto-redirect to home page after successful update
 - Styled file input button matching application design
+
+**Note:** All other device configuration, sensor monitoring, assembly data viewing, and advanced features are available via the REST API. See [docs/API_Endpoints.md](../../docs/API_Endpoints.md) for complete API documentation.
 
 ## REST API Endpoints
 
@@ -284,14 +246,15 @@ Reboot the device.
 
 ### Sensor Data Mapping
 
-The MPU6050 sensor data is written to Input Assembly 100 (`g_assembly_data064`) as 4 DINTs (16 bytes):
+IMU sensor data (MPU6050 or LSM6DS3) is written to Input Assembly 100 (`g_assembly_data064`) as 5 DINTs (20 bytes) at a configurable byte offset:
 
-- **Bytes 0-3**: DINT 0 - Fused angle (degrees * 100, little-endian)
-- **Bytes 4-7**: DINT 1 - Cylinder 1 pressure (PSI * 10, little-endian)
-- **Bytes 8-11**: DINT 2 - Cylinder 2 pressure (PSI * 10, little-endian)
-- **Bytes 12-15**: DINT 3 - Temperature (Celsius * 100, little-endian)
+- **DINT 0**: Roll angle (degrees × 10000, little-endian)
+- **DINT 1**: Pitch angle (degrees × 10000, little-endian)
+- **DINT 2**: Ground angle from vertical (degrees × 10000, little-endian)
+- **DINT 3**: Bottom cylinder pressure (PSI × 1000, little-endian)
+- **DINT 4**: Top cylinder pressure (PSI × 1000, little-endian)
 
-When the sensor is disabled, these bytes are zeroed out.
+When the sensor is disabled, these bytes are zeroed out. See [docs/ASSEMBLY_DATA_LAYOUT.md](../../docs/ASSEMBLY_DATA_LAYOUT.md) for complete details.
 
 ## Usage
 
@@ -305,19 +268,14 @@ When the sensor is disabled, these bytes are zeroed out.
 ### Configuration Workflow
 
 1. **Network Setup** (if needed):
-   - Navigate to Configuration page
+   - Navigate to Configuration page (`/`)
    - Configure IP settings in Network Configuration card
    - Click "Save Network Configuration"
    - Reboot device to apply changes
 
-2. **Sensor Configuration**:
-   - Navigate to Configuration page
-   - Enable/disable sensor in MPU6050 Sensor Configuration card
-   - Changes take effect immediately
-
-3. **Monitoring**:
-   - Navigate to MPU6050 Status page for real-time readings
-   - Navigate to Input/Output Assembly pages for bit-level data
+2. **Sensor Configuration and Monitoring**:
+   - Use REST API endpoints (see [docs/API_Endpoints.md](../../docs/API_Endpoints.md))
+   - Examples: `/api/mpu6050/status`, `/api/lsm6ds3/status`, `/api/assemblies`
 
 ### Firmware Update
 
@@ -388,9 +346,9 @@ This script extracts HTML from `webui_html.c` and updates all preview files.
 
 - All settings persist across reboots via NVS
 - Network configuration changes require a reboot to take effect
-- Sensor enable/disable changes take effect immediately
 - The web UI has no external dependencies (no CDN, all assets embedded)
-- The sensor navigation item is hidden when the sensor is disabled
+- All sensor configuration, monitoring, and advanced features are available via REST API
+- See [docs/API_Endpoints.md](../../docs/API_Endpoints.md) for complete API documentation
 
 ## Footer
 
