@@ -1,3 +1,21 @@
+/**
+ * @file mpu6050.h
+ * @brief MPU6050 6-axis accelerometer and gyroscope driver
+ * 
+ * This driver provides an interface to control the MPU6050 6-axis motion sensor.
+ * The MPU6050 combines a 3-axis accelerometer and 3-axis gyroscope on a single chip.
+ * 
+ * Features:
+ * - 3-axis accelerometer (2g, 4g, 8g, 16g ranges)
+ * - 3-axis gyroscope (250, 500, 1000, 2000 DPS ranges)
+ * - Digital low-pass filter (DLPF)
+ * - Temperature sensor
+ * - I2C interface
+ * - Roll, pitch, and ground angle calculations
+ * 
+ * @note I2C address: 0x68 (primary) or 0x69 (secondary, AD0 pin high)
+ */
+
 #ifndef MPU6050_H
 #define MPU6050_H
 
@@ -10,14 +28,28 @@
 extern "C" {
 #endif
 
-// I2C addresses
+/**
+ * @brief Primary I2C address for MPU6050 (AD0 pin low)
+ */
 #define MPU6050_I2C_ADDR_PRIMARY   0x68
+
+/**
+ * @brief Secondary I2C address for MPU6050 (AD0 pin high)
+ */
 #define MPU6050_I2C_ADDR_SECONDARY 0x69
 
-// MPU6050 Register Map
+/**
+ * @brief MPU6050 Register Map
+ * @{
+ */
+
+/** @brief Sample rate divider register */
 #define MPU6050_REG_SMPLRT_DIV      0x19
+/** @brief Configuration register (DLPF) */
 #define MPU6050_REG_CONFIG          0x1A
+/** @brief Gyroscope configuration register */
 #define MPU6050_REG_GYRO_CONFIG     0x1B
+/** @brief Accelerometer configuration register */
 #define MPU6050_REG_ACCEL_CONFIG    0x1C
 #define MPU6050_REG_FF_THR          0x1D
 #define MPU6050_REG_FF_DUR          0x1E
@@ -92,7 +124,14 @@ extern "C" {
 #define MPU6050_REG_ZG_OFFSET_H     0x17
 #define MPU6050_REG_ZG_OFFSET_L     0x18
 
-// Register bit definitions
+/** @} */
+
+/**
+ * @brief Register bit definitions
+ * @{
+ */
+
+/** @brief Power management 1 - Sleep bit */
 #define MPU6050_PWR_MGMT_1_SLEEP    0x40
 #define MPU6050_PWR_MGMT_1_RESET     0x80
 #define MPU6050_PWR_MGMT_1_CLKSEL_MASK 0x07
@@ -142,47 +181,316 @@ extern "C" {
 #define MPU6050_DLPF_BW_5HZ         0x06
 #define MPU6050_DLPF_BW_MASK        0x07
 
-// Sample rate divider
+/** @brief Sample rate divider maximum value */
 #define MPU6050_SAMPLE_RATE_DIV_MAX 255
 
-// Data structures
+/** @} */
+
+/**
+ * @brief Data structures
+ * @{
+ */
+
+/**
+ * @brief Accelerometer data structure
+ */
 typedef struct {
-    int16_t x;
-    int16_t y;
-    int16_t z;
+    int16_t x;  /**< X-axis acceleration (raw value) */
+    int16_t y;  /**< Y-axis acceleration (raw value) */
+    int16_t z;  /**< Z-axis acceleration (raw value) */
 } mpu6050_accel_t;
 
+/**
+ * @brief Gyroscope data structure
+ */
 typedef struct {
-    int16_t x;
-    int16_t y;
-    int16_t z;
+    int16_t x;  /**< X-axis angular velocity (raw value) */
+    int16_t y;  /**< Y-axis angular velocity (raw value) */
+    int16_t z;  /**< Z-axis angular velocity (raw value) */
 } mpu6050_gyro_t;
 
+/**
+ * @brief Temperature data structure
+ */
 typedef struct {
-    int16_t temperature;
+    int16_t temperature;  /**< Temperature reading (raw value) */
 } mpu6050_temp_t;
 
+/**
+ * @brief Combined sensor sample structure
+ */
 typedef struct {
-    mpu6050_accel_t accel;
-    mpu6050_gyro_t gyro;
-    mpu6050_temp_t temp;
+    mpu6050_accel_t accel;  /**< Accelerometer data */
+    mpu6050_gyro_t gyro;   /**< Gyroscope data */
+    mpu6050_temp_t temp;   /**< Temperature data */
 } mpu6050_sample_t;
 
+/**
+ * @brief Orientation angles structure
+ */
 typedef struct {
-    float roll;           // Roll angle in degrees
-    float pitch;          // Pitch angle in degrees
-    float abs_ground_angle; // Absolute ground angle in degrees (calculated from roll and pitch)
+    float roll;              /**< Roll angle in degrees */
+    float pitch;             /**< Pitch angle in degrees */
+    float abs_ground_angle;  /**< Absolute ground angle in degrees (calculated from roll and pitch) */
 } mpu6050_orientation_t;
 
+/**
+ * @brief MPU6050 device handle structure
+ */
 typedef struct {
-    i2c_master_dev_handle_t i2c_dev;
-    uint8_t accel_fs;
-    uint8_t gyro_fs;
-    float accel_scale;
-    float gyro_scale;
+    i2c_master_dev_handle_t i2c_dev;  /**< I2C device handle */
+    uint8_t accel_fs;                  /**< Accelerometer full-scale range setting */
+    uint8_t gyro_fs;                   /**< Gyroscope full-scale range setting */
+    float accel_scale;                 /**< Accelerometer scale factor for conversion */
+    float gyro_scale;                  /**< Gyroscope scale factor for conversion */
 } mpu6050_t;
 
-// Function prototypes
+/** @} */
+
+/**
+ * @brief Function prototypes
+ * @{
+ */
+
+/**
+ * @brief Initialize MPU6050 device structure
+ * 
+ * Initializes the device handle with default settings:
+ * - Accelerometer: 2G range
+ * - Gyroscope: 250 DPS range
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @param i2c_dev I2C device handle (must be initialized)
+ * @return true on success, false on error
+ */
+bool mpu6050_init(mpu6050_t *dev, i2c_master_dev_handle_t i2c_dev);
+
+/**
+ * @brief Write a single register
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @param reg Register address
+ * @param value Value to write
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t mpu6050_write_register(mpu6050_t *dev, uint8_t reg, uint8_t value);
+
+/**
+ * @brief Read a single register
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @param reg Register address
+ * @param value Pointer to store read value
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t mpu6050_read_register(mpu6050_t *dev, uint8_t reg, uint8_t *value);
+
+/**
+ * @brief Read multiple bytes starting from a register
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @param reg Starting register address
+ * @param buffer Buffer to store read data
+ * @param length Number of bytes to read
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t mpu6050_read_bytes(mpu6050_t *dev, uint8_t reg, uint8_t *buffer, size_t length);
+
+/**
+ * @brief Configure MPU6050 with default settings
+ * 
+ * Sets up the device with recommended default configuration:
+ * - Wake up from sleep
+ * - Set accelerometer to 2G range
+ * - Set gyroscope to 250 DPS range
+ * - Configure DLPF
+ * - Set sample rate
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t mpu6050_configure_default(mpu6050_t *dev);
+
+/**
+ * @brief Reset MPU6050 device
+ * 
+ * Performs a software reset of the MPU6050.
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t mpu6050_reset(mpu6050_t *dev);
+
+/**
+ * @brief Wake up MPU6050 from sleep mode
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t mpu6050_wake_up(mpu6050_t *dev);
+
+/**
+ * @brief Read WHO_AM_I register
+ * 
+ * Reads the device ID register to verify communication.
+ * Expected value: 0x68
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @param who_am_i Pointer to store WHO_AM_I value
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t mpu6050_read_who_am_i(mpu6050_t *dev, uint8_t *who_am_i);
+
+/**
+ * @brief Set accelerometer full-scale range
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @param fs_range Full-scale range (MPU6050_ACCEL_FS_2G, MPU6050_ACCEL_FS_4G, etc.)
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t mpu6050_set_accel_config(mpu6050_t *dev, uint8_t fs_range);
+
+/**
+ * @brief Set gyroscope full-scale range
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @param fs_range Full-scale range (MPU6050_GYRO_FS_250DPS, MPU6050_GYRO_FS_500DPS, etc.)
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t mpu6050_set_gyro_config(mpu6050_t *dev, uint8_t fs_range);
+
+/**
+ * @brief Set digital low-pass filter bandwidth
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @param dlpf_bw DLPF bandwidth (MPU6050_DLPF_BW_260HZ, MPU6050_DLPF_BW_184HZ, etc.)
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t mpu6050_set_dlpf(mpu6050_t *dev, uint8_t dlpf_bw);
+
+/**
+ * @brief Set sample rate divider
+ * 
+ * Sample rate = 1kHz / (1 + divider)
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @param divider Sample rate divider (0-255)
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t mpu6050_set_sample_rate(mpu6050_t *dev, uint8_t divider);
+
+/**
+ * @brief Read accelerometer data
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @param accel Pointer to store accelerometer data
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t mpu6050_read_accel(mpu6050_t *dev, mpu6050_accel_t *accel);
+
+/**
+ * @brief Read gyroscope data
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @param gyro Pointer to store gyroscope data
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t mpu6050_read_gyro(mpu6050_t *dev, mpu6050_gyro_t *gyro);
+
+/**
+ * @brief Read temperature data
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @param temp Pointer to store temperature data
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t mpu6050_read_temp(mpu6050_t *dev, mpu6050_temp_t *temp);
+
+/**
+ * @brief Read all sensor data (accelerometer, gyroscope, temperature)
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @param sample Pointer to store combined sensor data
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t mpu6050_read_all(mpu6050_t *dev, mpu6050_sample_t *sample);
+
+/**
+ * @brief Enable/disable I2C bypass mode
+ * 
+ * When enabled, the MPU6050's I2C master is disabled and the auxiliary I2C bus
+ * is accessible directly.
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @param enable true to enable bypass, false to disable
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t mpu6050_enable_bypass_mode(mpu6050_t *dev, bool enable);
+
+/**
+ * @brief Calculate roll and pitch angles from accelerometer data
+ * 
+ * Calculates roll and pitch angles in degrees from raw accelerometer data.
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @param accel Pointer to accelerometer data
+ * @param roll Pointer to store roll angle (degrees)
+ * @param pitch Pointer to store pitch angle (degrees)
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t mpu6050_calculate_roll_pitch(mpu6050_t *dev, const mpu6050_accel_t *accel, float *roll, float *pitch);
+
+/**
+ * @brief Calculate absolute ground angle from accelerometer data
+ * 
+ * Calculates the absolute angle from vertical (ground angle) in degrees.
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @param accel Pointer to accelerometer data
+ * @param abs_ground_angle Pointer to store ground angle (degrees)
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t mpu6050_calculate_ground_angle(mpu6050_t *dev, const mpu6050_accel_t *accel, float *abs_ground_angle);
+
+/**
+ * @brief Calculate orientation (roll, pitch, ground angle) from accelerometer data
+ * 
+ * Calculates all orientation angles from raw accelerometer data.
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @param accel Pointer to accelerometer data
+ * @param orientation Pointer to store orientation data
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t mpu6050_calculate_orientation(mpu6050_t *dev, const mpu6050_accel_t *accel, mpu6050_orientation_t *orientation);
+
+/**
+ * @brief Set accelerometer offset registers
+ * 
+ * Sets the hardware offset registers for accelerometer calibration.
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @param x X-axis offset
+ * @param y Y-axis offset
+ * @param z Z-axis offset
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t mpu6050_set_accel_offsets(mpu6050_t *dev, int16_t x, int16_t y, int16_t z);
+
+/**
+ * @brief Set gyroscope offset registers
+ * 
+ * Sets the hardware offset registers for gyroscope calibration.
+ * 
+ * @param dev Pointer to MPU6050 device structure
+ * @param x X-axis offset
+ * @param y Y-axis offset
+ * @param z Z-axis offset
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t mpu6050_set_gyro_offsets(mpu6050_t *dev, int16_t x, int16_t y, int16_t z);
+
+/** @} */
 bool mpu6050_init(mpu6050_t *dev, i2c_master_dev_handle_t i2c_dev);
 esp_err_t mpu6050_write_register(mpu6050_t *dev, uint8_t reg, uint8_t value);
 esp_err_t mpu6050_read_register(mpu6050_t *dev, uint8_t reg, uint8_t *value);

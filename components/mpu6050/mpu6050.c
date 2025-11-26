@@ -1,3 +1,10 @@
+/**
+ * @file mpu6050.c
+ * @brief MPU6050 6-axis accelerometer and gyroscope driver implementation
+ * 
+ * Implementation of the MPU6050 driver for ESP32-P4 platform.
+ */
+
 /*
  * Copyright (c) 2025, Adam G. Sweeney <agsweeney@gmail.com>
  *

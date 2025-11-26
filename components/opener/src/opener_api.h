@@ -1,3 +1,13 @@
+/**
+ * @file opener_api.h
+ * @brief OpENer EtherNet/IP Stack Public API
+ * 
+ * This is the public interface of the OpENer EtherNet/IP stack. It provides
+ * all functions needed to implement an EtherNet/IP enabled slave device.
+ * 
+ * @ingroup CIP_API
+ */
+
 /*******************************************************************************
  * Copyright (c) 2009, Rockwell Automation, Inc.
  * All rights reserved.

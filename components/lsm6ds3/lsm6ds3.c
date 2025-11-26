@@ -1,3 +1,10 @@
+/**
+ * @file lsm6ds3.c
+ * @brief LSM6DS3 6-axis accelerometer and gyroscope driver implementation
+ * 
+ * Implementation of the LSM6DS3 driver for ESP32-P4 platform.
+ */
+
 /*
  * MIT License
  *

@@ -394,13 +394,54 @@ typedef struct {
     err_t err;
 } AcdStartProbeContext;
 
+/**
+ * @brief Try to start pending ACD probe sequence
+ * 
+ * Attempts to start the ACD probe sequence if conditions are met (link up,
+ * MAC address available). Called when ACD was deferred due to missing conditions.
+ * 
+ * @param netif ESP-NETIF handle
+ * @param lwip_netif lwIP netif structure
+ */
 static void tcpip_try_pending_acd(esp_netif_t *netif, struct netif *lwip_netif);
+
+/**
+ * @brief Retry ACD after deferred delay
+ * 
+ * Callback to retry ACD after a short delay when it was deferred.
+ * 
+ * @param arg ESP-NETIF handle (cast from void*)
+ */
 static void tcpip_retry_acd_deferred(void *arg);
+
 #if CONFIG_OPENER_ACD_RETRY_ENABLED
+/**
+ * @brief ACD retry timer callback
+ * 
+ * Called when ACD retry timer expires. Restarts ACD probe sequence.
+ * 
+ * @param xTimer Timer handle
+ */
 static void tcpip_acd_retry_timer_callback(TimerHandle_t xTimer);
+
+/**
+ * @brief Start ACD retry sequence
+ * 
+ * Initiates a retry of the ACD probe sequence after a conflict was detected.
+ * 
+ * @param netif ESP-NETIF handle
+ * @param lwip_netif lwIP netif structure
+ */
 static void tcpip_acd_start_retry(esp_netif_t *netif, struct netif *lwip_netif);
 
-// Callback to start ACD probe on tcpip thread (used when direct acd_start() fails)
+/**
+ * @brief Callback to start ACD probe on tcpip thread
+ * 
+ * Used when direct acd_start() fails. Executes on tcpip thread with proper
+ * context and stack space.
+ * 
+ * @param arg AcdStartProbeContext pointer (heap-allocated, freed in this function)
+ */
 static void acd_start_probe_cb(void *arg) {
     AcdStartProbeContext *ctx = (AcdStartProbeContext *)arg;
     if (ctx == NULL || ctx->netif == NULL) {
@@ -415,7 +456,14 @@ static void acd_start_probe_cb(void *arg) {
     free(ctx);  // Free heap-allocated context
 }
 
-// Callback for retry timer: executes retry on tcpip thread (has more stack space)
+/**
+ * @brief Callback for retry timer
+ * 
+ * Executes retry on tcpip thread (has more stack space). Called when
+ * ACD retry timer expires.
+ * 
+ * @param arg Unused (cast to void*)
+ */
 static void retry_callback(void *arg) {
     (void)arg;
     if (s_acd_retry_netif != NULL && s_acd_retry_lwip_netif != NULL) {
@@ -427,6 +475,14 @@ static void retry_callback(void *arg) {
 #endif
 #endif
 
+/**
+ * @brief Check if netif has a valid hardware address
+ * 
+ * Verifies that the netif structure has a non-zero MAC address.
+ * 
+ * @param netif lwIP netif structure
+ * @return true if netif has valid MAC address, false otherwise
+ */
 static bool netif_has_valid_hwaddr(struct netif *netif) {
     if (netif == NULL) {
         return false;
@@ -449,6 +505,18 @@ static void user_led_flash_task(void *pvParameters);
 static void user_led_start_flash(void);
 static void user_led_stop_flash(void);
 
+/**
+ * @brief ACD conflict detection callback
+ * 
+ * Called by lwIP ACD module when ACD state changes. Handles IP assignment,
+ * conflict detection, retry logic, and LED indication.
+ * 
+ * @param netif lwIP netif structure
+ * @param state ACD callback state:
+ *              - ACD_IP_OK: Probe successful, IP can be assigned
+ *              - ACD_RESTART_CLIENT: Conflict detected, restart client
+ *              - ACD_DECLINE: Conflict detected, decline IP
+ */
 static void tcpip_acd_conflict_callback(struct netif *netif, acd_callback_enum_t state) {
     ESP_LOGI(TAG, "ACD callback received: state=%d (0=IP_OK, 1=RESTART_CLIENT, 2=DECLINE)", (int)state);
     s_acd_last_state = state;
@@ -521,6 +589,14 @@ static void tcpip_acd_conflict_callback(struct netif *netif, acd_callback_enum_t
     }
 }
 
+/**
+ * @brief ACD start callback (executes on tcpip thread)
+ * 
+ * Registers ACD client with lwIP ACD module. Called via tcpip_callback_with_block()
+ * to ensure thread-safe execution on the tcpip thread.
+ * 
+ * @param arg AcdStartContext pointer (heap-allocated, freed in this function)
+ */
 static void tcpip_acd_start_cb(void *arg) {
     ESP_LOGI(TAG, "tcpip_acd_start_cb: CALLBACK EXECUTING - arg=%p", arg);
     AcdStartContext *ctx = (AcdStartContext *)arg;
@@ -608,12 +684,39 @@ static void tcpip_acd_start_cb(void *arg) {
     free(ctx);
 }
 
+/**
+ * @brief ACD stop callback (executes on tcpip thread)
+ * 
+ * Stops ACD client. Called via tcpip_callback_with_block() to ensure
+ * thread-safe execution on the tcpip thread.
+ * 
+ * @param arg Unused (cast to void*)
+ */
 static void tcpip_acd_stop_cb(void *arg) {
     (void)arg;
     acd_stop(&s_static_ip_acd);
 }
 
-/* Legacy ACD function */
+/**
+ * @brief Perform Address Conflict Detection (ACD) for static IP
+ * 
+ * Implements RFC 5227 compliant ACD for static IP addresses. Coordinates
+ * the ACD probe sequence, registration, and callback handling.
+ * 
+ * This function:
+ * - Registers ACD client with lwIP ACD module
+ * - Starts ACD probe sequence (3 probes with configurable intervals)
+ * - Waits for ACD completion (probe phase ~600-800ms)
+ * - Returns true if IP is safe to use, false if conflict detected
+ * 
+ * @param netif lwIP netif structure (must be valid and have MAC address)
+ * @param ip IP address to check for conflicts
+ * @return true if IP is safe to use (no conflict), false if conflict detected
+ * 
+ * @note This function blocks for up to 2 seconds waiting for ACD completion
+ * @note ACD probe sequence: PROBE_WAIT → PROBING → ANNOUNCE_WAIT → ANNOUNCING → ONGOING
+ * @note Uses semaphores and callbacks for thread-safe operation
+ */
 static bool tcpip_perform_acd(struct netif *netif, const ip4_addr_t *ip) {
     if (!g_tcpip.select_acd) {
         g_tcpip.status &= ~(kTcpipStatusAcdStatus | kTcpipStatusAcdFault);
@@ -1016,7 +1119,15 @@ static void tcpip_acd_start_retry(esp_netif_t *netif, struct netif *lwip_netif) 
 #endif /* CONFIG_OPENER_ACD_RETRY_ENABLED */
 
 #if !LWIP_IPV4 || !LWIP_ACD
-// Stub implementation when ACD is not available
+/**
+ * @brief Stub ACD implementation when ACD is not available
+ * 
+ * Returns false if ACD was requested but not supported by lwIP configuration.
+ * 
+ * @param netif Unused (cast to void)
+ * @param ip Unused (cast to void)
+ * @return false if ACD was requested, true otherwise
+ */
 static bool tcpip_perform_acd(struct netif *netif, const ip4_addr_t *ip) {
     (void)netif;
     (void)ip;
