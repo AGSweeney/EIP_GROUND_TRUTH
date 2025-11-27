@@ -3,12 +3,28 @@
  * @brief LSM6DS3 6-axis accelerometer and gyroscope driver implementation
  * 
  * Implementation of the LSM6DS3 driver for ESP32-P4 platform.
+ * 
+ * This driver uses register definitions and low-level functions from the
+ * STMicroelectronics STMems_Standard_C_drivers library:
+ * https://github.com/STMicroelectronics/STMems_Standard_C_drivers
+ * 
+ * The register driver files (driver/lsm6ds3_reg.c and driver/lsm6ds3_reg.h)
+ * are from STMicroelectronics and are licensed under BSD 3-Clause License.
+ * The full BSD 3-Clause license text is included in those files.
  */
 
 /*
  * MIT License
  *
  * Copyright (c) 2025 Adam G. Sweeney <agsweeney@gmail.com>
+ * 
+ * This driver incorporates code from STMicroelectronics:
+ * Copyright (c) 2018-2025 STMicroelectronics
+ * Licensed under BSD 3-Clause License
+ * 
+ * The register driver files (driver/lsm6ds3_reg.c and driver/lsm6ds3_reg.h)
+ * contain the full BSD 3-Clause license text and copyright notice as required
+ * by the BSD 3-Clause License.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -369,7 +385,8 @@ esp_err_t lsm6ds3_read_accel(lsm6ds3_handle_t *handle, float accel_mg[3])
     int32_t ret = lsm6ds3_acceleration_raw_get(&handle->ctx, data_raw_acceleration.u8bit);
     if (ret != 0) {
         static uint32_t read_error_count = 0;
-        if (++read_error_count % 50 == 1) {
+        // Log first error and then every 100th error (reduced from 50)
+        if (++read_error_count == 1 || read_error_count % 100 == 0) {
             ESP_LOGE(TAG, "Failed to read acceleration raw data: %ld (error #%lu)", ret, read_error_count);
         }
         return ESP_FAIL;
@@ -385,8 +402,6 @@ esp_err_t lsm6ds3_read_accel(lsm6ds3_handle_t *handle, float accel_mg[3])
     
     // Debug: Log raw bytes frequently to diagnose the zero-read issue
     static uint32_t debug_count = 0;
-    static uint8_t last_bytes[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-    bool bytes_changed = memcmp(data_raw_acceleration.u8bit, last_bytes, 6) != 0;
     bool all_zeros = (data_raw_acceleration.u8bit[0] == 0 && data_raw_acceleration.u8bit[1] == 0 &&
                      data_raw_acceleration.u8bit[2] == 0 && data_raw_acceleration.u8bit[3] == 0 &&
                      data_raw_acceleration.u8bit[4] == 0 && data_raw_acceleration.u8bit[5] == 0);
@@ -394,43 +409,40 @@ esp_err_t lsm6ds3_read_accel(lsm6ds3_handle_t *handle, float accel_mg[3])
     // Check if we got all zeros (which might indicate a problem)
     if (all_zeros) {
         static uint32_t zero_count = 0;
-        if (++zero_count == 1 || zero_count % 100 == 0) {
-            ESP_LOGW(TAG, "Accelerometer read returned all zeros (read #%lu) - checking sensor", zero_count);
-            // Try reading WHO_AM_I to verify sensor is still responding
-            uint8_t whoami = 0;
-            if (lsm6ds3_device_id_get(&handle->ctx, &whoami) == 0) {
-                if (whoami == LSM6DS3_ID) {
-                    ESP_LOGI(TAG, "Sensor WHO_AM_I OK: 0x%02X - sensor is responsive but returning zeros", whoami);
+        // Log first occurrence and then every 1000th zero read (reduced from 100)
+        if (++zero_count == 1 || zero_count % 1000 == 0) {
+            ESP_LOGW(TAG, "Accelerometer read returned all zeros (read #%lu)", zero_count);
+            
+            // Only perform detailed diagnostics on first occurrence or every 10000th zero read
+            if (zero_count == 1 || zero_count % 10000 == 0) {
+                // Try reading WHO_AM_I to verify sensor is still responding
+                uint8_t whoami = 0;
+                if (lsm6ds3_device_id_get(&handle->ctx, &whoami) == 0) {
+                    if (whoami == LSM6DS3_ID) {
+                        ESP_LOGD(TAG, "Sensor WHO_AM_I OK: 0x%02X - sensor is responsive but returning zeros", whoami);
+                    } else {
+                        ESP_LOGE(TAG, "Sensor WHO_AM_I wrong: 0x%02X (expected 0x%02X)", whoami, LSM6DS3_ID);
+                    }
                 } else {
-                    ESP_LOGE(TAG, "Sensor WHO_AM_I wrong: 0x%02X (expected 0x%02X)", whoami, LSM6DS3_ID);
+                    ESP_LOGE(TAG, "Failed to read WHO_AM_I - I2C communication may be broken");
                 }
-            } else {
-                ESP_LOGE(TAG, "Failed to read WHO_AM_I - I2C communication may be broken");
-            }
-            // Check STATUS_REG to see if data is available
-            lsm6ds3_status_reg_t status;
-            if (lsm6ds3_status_reg_get(&handle->ctx, &status) == 0) {
-                ESP_LOGI(TAG, "STATUS_REG: XLDA=%d GDA=%d TDA=%d (XLDA=1 means accel data available)", 
-                         status.xlda, status.gda, status.tda);
-            } else {
-                ESP_LOGW(TAG, "Failed to read STATUS_REG");
-            }
-            // Read back CTRL1_XL to verify sensor is enabled
-            lsm6ds3_odr_xl_t odr_check;
-            if (lsm6ds3_xl_data_rate_get(&handle->ctx, &odr_check) == 0) {
-                ESP_LOGI(TAG, "CTRL1_XL ODR readback: %d (0=OFF, 4=104Hz)", odr_check);
-            } else {
-                ESP_LOGW(TAG, "Failed to read CTRL1_XL");
+                // Check STATUS_REG to see if data is available
+                lsm6ds3_status_reg_t status;
+                if (lsm6ds3_status_reg_get(&handle->ctx, &status) == 0) {
+                    ESP_LOGD(TAG, "STATUS_REG: XLDA=%d GDA=%d TDA=%d (XLDA=1 means accel data available)", 
+                             status.xlda, status.gda, status.tda);
+                } else {
+                    ESP_LOGD(TAG, "Failed to read STATUS_REG");
+                }
+                // Read back CTRL1_XL to verify sensor is enabled
+                lsm6ds3_odr_xl_t odr_check;
+                if (lsm6ds3_xl_data_rate_get(&handle->ctx, &odr_check) == 0) {
+                    ESP_LOGD(TAG, "CTRL1_XL ODR readback: %d (0=OFF, 4=104Hz)", odr_check);
+                } else {
+                    ESP_LOGD(TAG, "Failed to read CTRL1_XL");
+                }
             }
         }
-    }
-    
-    // Log only first read and every 1000th to reduce spam
-    if (++debug_count == 1 || debug_count % 1000 == 0) {
-        if (all_zeros) {
-            ESP_LOGW(TAG, "Accel[%lu] read returned all zeros", debug_count);
-        }
-        memcpy(last_bytes, data_raw_acceleration.u8bit, 6);
     }
     
     lsm6ds3_fs_xl_t fs;
@@ -491,7 +503,8 @@ esp_err_t lsm6ds3_read_gyro(lsm6ds3_handle_t *handle, float gyro_mdps[3])
     int32_t ret = lsm6ds3_angular_rate_raw_get(&handle->ctx, data_raw_angular_rate.u8bit);
     if (ret != 0) {
         static uint32_t read_error_count = 0;
-        if (++read_error_count % 50 == 1) {
+        // Log first error and then every 100th error (reduced from 50)
+        if (++read_error_count == 1 || read_error_count % 100 == 0) {
             ESP_LOGE(TAG, "Failed to read angular rate raw data: %ld (error #%lu)", ret, read_error_count);
         }
         return ESP_FAIL;

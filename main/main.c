@@ -1554,11 +1554,21 @@ static void scan_i2c_bus(i2c_master_bus_handle_t bus_handle)
             case 0x18:
                 device_name = "ES8311 (Audio Codec)";
                 break;
+            case 0x20:
+            case 0x21:
+            case 0x22:
+            case 0x23:
+            case 0x24:
+            case 0x25:
+            case 0x26:
+            case 0x27:
+                device_name = "MCP230XX (GPIO Expander)";
+                break;
             case 0x29: 
-                device_name = "Unknown device";
+                device_name = "VL53L1x (Time-of-Flight)";
                 break;
             case 0x2A: 
-                device_name = "Unknown device";
+                device_name = "NAU7802 (24-bit ADC)";
                 break;
             case 0x68: 
                 device_name = "MPU6050 (IMU) - AD0 LOW";

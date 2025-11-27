@@ -5,6 +5,14 @@
  * This driver provides an interface to control the LSM6DS3 6-axis motion sensor.
  * The LSM6DS3 combines a 3-axis accelerometer and 3-axis gyroscope on a single chip.
  * 
+ * This driver uses register definitions from the STMicroelectronics
+ * STMems_Standard_C_drivers library:
+ * https://github.com/STMicroelectronics/STMems_Standard_C_drivers
+ * 
+ * The register driver files (driver/lsm6ds3_reg.c and driver/lsm6ds3_reg.h)
+ * are from STMicroelectronics and are licensed under BSD 3-Clause License.
+ * The full BSD 3-Clause license text is included in those files.
+ * 
  * Features:
  * - 3-axis accelerometer (2g, 4g, 8g, 16g ranges)
  * - 3-axis gyroscope (125, 250, 500, 1000, 2000 DPS ranges)
@@ -15,12 +23,21 @@
  * - Block data update mode
  * 
  * @note Supports both I2C and SPI communication interfaces
+ * @note Register driver files (lsm6ds3_reg.h/c) are from STMicroelectronics
  */
 
 /*
  * MIT License
  *
  * Copyright (c) 2025 Adam G. Sweeney <agsweeney@gmail.com>
+ * 
+ * This driver incorporates code from STMicroelectronics:
+ * Copyright (c) 2018-2025 STMicroelectronics
+ * Licensed under BSD 3-Clause License
+ * 
+ * The register driver files (driver/lsm6ds3_reg.c and driver/lsm6ds3_reg.h)
+ * contain the full BSD 3-Clause license text and copyright notice as required
+ * by the BSD 3-Clause License.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal

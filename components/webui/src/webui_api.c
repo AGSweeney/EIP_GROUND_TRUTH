@@ -31,6 +31,7 @@
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_system.h"
+#include "esp_ota_ops.h"
 #include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -171,10 +172,22 @@ static esp_err_t api_ota_update_handler(httpd_req_t *req)
         size_t content_len = req->content_len;
         ESP_LOGI(TAG, "Content-Length: %d", content_len);
         
-        // Validate size
-        if (content_len > 2 * 1024 * 1024) { // Max 2MB for safety
-            ESP_LOGW(TAG, "Content length too large: %d", content_len);
-            return send_json_error(req, "File too large (max 2MB)", 400);
+        // Get OTA partition size to validate against actual partition capacity
+        const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
+        size_t max_firmware_size = 0;
+        if (update_partition != NULL) {
+            max_firmware_size = update_partition->size;
+            ESP_LOGI(TAG, "OTA partition size: %d bytes", max_firmware_size);
+        } else {
+            // Fallback to 1.5MB if partition lookup fails (matches partition table)
+            max_firmware_size = 0x180000; // 1,572,864 bytes
+            ESP_LOGW(TAG, "Could not determine partition size, using default: %d bytes", max_firmware_size);
+        }
+        
+        // Validate size against partition capacity
+        if (content_len > 0 && content_len > max_firmware_size) {
+            ESP_LOGW(TAG, "Content length too large: %d bytes (max: %d bytes)", content_len, max_firmware_size);
+            return send_json_error(req, "File too large for OTA partition", 400);
         }
         
         // Parse multipart boundary first
@@ -205,16 +218,26 @@ static esp_err_t api_ota_update_handler(httpd_req_t *req)
         // Read enough to find the data separator (\r\n\r\n)
         size_t header_read = 0;
         bool found_separator = false;
+        uint32_t header_timeout_count = 0;
+        const uint32_t max_header_timeouts = 50; // Max 50 timeouts (~5 seconds at 100ms each)
+        
         while (header_read < header_buffer_size - 1) {
             int ret = httpd_req_recv(req, header_buffer + header_read, header_buffer_size - header_read - 1);
             if (ret <= 0) {
                 if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+                    header_timeout_count++;
+                    if (header_timeout_count > max_header_timeouts) {
+                        ESP_LOGE(TAG, "Too many timeouts reading multipart headers");
+                        free(header_buffer);
+                        return send_json_error(req, "Timeout reading request headers", 408);
+                    }
                     continue;
                 }
                 ESP_LOGE(TAG, "Error reading headers: %d", ret);
                 free(header_buffer);
                 return send_json_error(req, "Failed to read request headers", 500);
             }
+            header_timeout_count = 0; // Reset timeout counter on successful read
             header_read += ret;
             header_buffer[header_read] = '\0'; // Null terminate for string search
             
@@ -333,21 +356,35 @@ static esp_err_t api_ota_update_handler(httpd_req_t *req)
         char *chunk_buffer = malloc(chunk_size);
         if (chunk_buffer == NULL) {
             ESP_LOGE(TAG, "Failed to allocate chunk buffer");
+            // Abort OTA update since we can't continue
+            esp_ota_abort(ota_handle);
             return send_json_error(req, "Failed to allocate memory", 500);
         }
         
         size_t total_written = data_in_buffer;
+        uint32_t timeout_count = 0;
+        const uint32_t max_timeouts = 100; // Max 100 timeouts (~10 seconds at 100ms each)
         
         while (!done) {
             int ret = httpd_req_recv(req, chunk_buffer, chunk_size);
             if (ret <= 0) {
                 if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+                    timeout_count++;
+                    if (timeout_count > max_timeouts) {
+                        ESP_LOGE(TAG, "Too many timeouts during upload, aborting");
+                        esp_ota_abort(ota_handle);
+                        free(chunk_buffer);
+                        return send_json_error(req, "Upload timeout - connection too slow", 408);
+                    }
                     continue;
                 }
-                // Connection closed or error
-                done = true;
-                break;
+                // Connection closed or error - abort OTA update
+                ESP_LOGE(TAG, "Connection error during upload (ret=%d), aborting OTA", ret);
+                esp_ota_abort(ota_handle);
+                free(chunk_buffer);
+                return send_json_error(req, "Connection closed during upload", 500);
             }
+            timeout_count = 0; // Reset timeout counter on successful read
             
             // Search for boundary markers in this chunk
             // Look for both start boundary (--boundary) and end boundary (--boundary--)
@@ -425,6 +462,24 @@ static esp_err_t api_ota_update_handler(httpd_req_t *req)
         free(chunk_buffer);
         
         ESP_LOGI(TAG, "Streamed %d bytes to OTA partition", total_written);
+        
+        // Validate upload completeness if Content-Length was provided
+        if (content_len > 0) {
+            // Account for multipart overhead (boundary + headers, typically ~1KB)
+            size_t expected_firmware_bytes = (content_len > 1024) ? (content_len - 1024) : content_len;
+            // Allow 5% tolerance for multipart overhead variations
+            size_t min_expected = (expected_firmware_bytes * 95) / 100;
+            
+            if (total_written < min_expected) {
+                ESP_LOGE(TAG, "Upload incomplete: received %d bytes, expected at least %d bytes", 
+                         total_written, min_expected);
+                esp_ota_abort(ota_handle);
+                return send_json_error(req, "Upload incomplete - connection may have been interrupted", 400);
+            }
+            
+            ESP_LOGI(TAG, "Upload validation: received %d bytes, expected ~%d bytes (within tolerance)", 
+                     total_written, expected_firmware_bytes);
+        }
         
         // Finish OTA update (this will set boot partition and reboot)
         // Send HTTP response BEFORE finishing, as the device will reboot
