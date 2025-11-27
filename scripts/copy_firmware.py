@@ -61,6 +61,26 @@ def main():
     # Create FirmwareImages directory if it doesn't exist
     os.makedirs(firmware_images_dir, exist_ok=True)
     
+    # Remove old firmware files matching the project name pattern
+    try:
+        if os.path.exists(firmware_images_dir):
+            removed_count = 0
+            for filename in os.listdir(firmware_images_dir):
+                # Match files that start with project_name and end with .bin
+                if filename.startswith(project_name + "_") and filename.endswith(".bin"):
+                    old_file_path = os.path.join(firmware_images_dir, filename)
+                    try:
+                        os.remove(old_file_path)
+                        removed_count += 1
+                        print(f"Removed old firmware: {filename}")
+                    except Exception as e:
+                        print(f"Warning: Failed to remove {filename}: {e}")
+            if removed_count > 0:
+                print(f"Removed {removed_count} old firmware file(s)")
+    except Exception as e:
+        print(f"Warning: Error while removing old firmware files: {e}")
+        # Continue anyway - don't fail the build if we can't clean up
+    
     # Generate timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     

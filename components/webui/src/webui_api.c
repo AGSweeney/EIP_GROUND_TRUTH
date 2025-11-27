@@ -272,14 +272,16 @@ static esp_err_t api_ota_update_handler(httpd_req_t *req)
         // Calculate how much data we already have in the buffer
         size_t data_in_buffer = header_read - header_len;
         
-        // Start streaming OTA update
-        // Estimate firmware size: Content-Length minus multipart headers (typically ~1KB)
-        // This gives us a reasonable estimate for progress tracking
-        size_t estimated_firmware_size = 0;
+        // Calculate expected firmware size for validation (before the loop)
+        // Account for multipart overhead (boundary + headers, typically ~1KB)
+        size_t expected_firmware_bytes = 0;
         if (content_len > 0) {
-            // Subtract estimated multipart header overhead (boundary + headers ~1KB)
-            estimated_firmware_size = (content_len > 1024) ? (content_len - 1024) : content_len;
+            expected_firmware_bytes = (content_len > 1024) ? (content_len - 1024) : content_len;
         }
+        
+        // Start streaming OTA update
+        // Use expected_firmware_bytes for progress tracking
+        size_t estimated_firmware_size = expected_firmware_bytes;
         esp_ota_handle_t ota_handle = ota_manager_start_streaming_update(estimated_firmware_size);
         if (ota_handle == 0) {
             ESP_LOGE(TAG, "Failed to start streaming OTA update - check serial logs for details");
@@ -378,11 +380,35 @@ static esp_err_t api_ota_update_handler(httpd_req_t *req)
                     }
                     continue;
                 }
-                // Connection closed or error - abort OTA update
-                ESP_LOGE(TAG, "Connection error during upload (ret=%d), aborting OTA", ret);
-                esp_ota_abort(ota_handle);
-                free(chunk_buffer);
-                return send_json_error(req, "Connection closed during upload", 500);
+                
+                // ret == 0 means connection closed by client (EOF)
+                // This is normal when client finishes sending data
+                if (ret == 0) {
+                    if (done) {
+                        // Already found boundary, connection close is expected
+                        ESP_LOGI(TAG, "Connection closed by client after receiving all data");
+                        break;
+                    } else if (expected_firmware_bytes > 0 && 
+                               total_written >= (expected_firmware_bytes * 95 / 100)) {
+                        // Received at least 95% of expected data, likely complete
+                        ESP_LOGI(TAG, "Connection closed by client, received %d bytes (expected ~%d)", 
+                                 total_written, expected_firmware_bytes);
+                        break;
+                    } else {
+                        // Connection closed but we haven't received enough data
+                        ESP_LOGE(TAG, "Connection closed prematurely (ret=0): received %d bytes, expected ~%d bytes", 
+                                 total_written, expected_firmware_bytes);
+                        esp_ota_abort(ota_handle);
+                        free(chunk_buffer);
+                        return send_json_error(req, "Connection closed before upload completed", 500);
+                    }
+                } else {
+                    // Negative ret value indicates actual error
+                    ESP_LOGE(TAG, "Connection error during upload (ret=%d), aborting OTA", ret);
+                    esp_ota_abort(ota_handle);
+                    free(chunk_buffer);
+                    return send_json_error(req, "Connection error during upload", 500);
+                }
             }
             timeout_count = 0; // Reset timeout counter on successful read
             
@@ -464,9 +490,8 @@ static esp_err_t api_ota_update_handler(httpd_req_t *req)
         ESP_LOGI(TAG, "Streamed %d bytes to OTA partition", total_written);
         
         // Validate upload completeness if Content-Length was provided
-        if (content_len > 0) {
-            // Account for multipart overhead (boundary + headers, typically ~1KB)
-            size_t expected_firmware_bytes = (content_len > 1024) ? (content_len - 1024) : content_len;
+        // (This serves as a secondary safety check after the loop)
+        if (content_len > 0 && expected_firmware_bytes > 0) {
             // Allow 5% tolerance for multipart overhead variations
             size_t min_expected = (expected_firmware_bytes * 95) / 100;
             
