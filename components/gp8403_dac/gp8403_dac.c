@@ -2,7 +2,10 @@
  * @file gp8403_dac.c
  * @brief DFRobot Gravity 2-Channel I2C DAC Module (0-10V) Driver Implementation
  * 
- * Implementation of the GP8403 DAC driver for ESP32-P4 platform.
+ * ESP-IDF port of the GP8403 DAC driver for ESP32-P4 platform.
+ * 
+ * This implementation is based on and references the DFRobot_GP8403 Arduino library:
+ * https://github.com/DFRobot/DFRobot_GP8403
  * 
  * @note Product: DFRobot Gravity 2-Channel I2C DAC Module (0-10V)
  * @note SKU: DFR0971
@@ -12,6 +15,10 @@
 
 /*
  * Copyright (c) 2025, Adam G. Sweeney <agsweeney@gmail.com>
+ * 
+ * Portions of this code reference the DFRobot_GP8403 Arduino library:
+ * Copyright (c) 2022 DFRobot (https://github.com/DFRobot/DFRobot_GP8403)
+ * Written by tangjie (jie.tang@dfrobot.com)
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -23,7 +30,7 @@
  * The above copyright notice and this permission notice shall be included in
  * all copies or substantial portions of the Software.
  *
- * THE SOFTWARE IS PROVIDED "AS AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
  * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER

@@ -5,6 +5,9 @@
  * This driver provides an interface to control the GP8403-based 2-channel
  * 0-10V DAC module from DFRobot (SKU: DFR0971).
  * 
+ * This implementation is based on and references the DFRobot_GP8403 Arduino library:
+ * https://github.com/DFRobot/DFRobot_GP8403
+ * 
  * Features:
  * - 2 independent channels (VOUT0, VOUT1)
  * - 0-10V output range per channel
@@ -16,6 +19,7 @@
  * 
  * @note Product page: https://www.dfrobot.com/product-2613.html
  * @note Chip: GP8403
+ * @note Based on DFRobot_GP8403 library by tangjie (jie.tang@dfrobot.com)
  */
 
 #ifndef GP8403_DAC_H

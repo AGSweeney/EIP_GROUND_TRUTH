@@ -341,9 +341,20 @@ idf_component_register(
 - [DFRobot Wiki](https://wiki.dfrobot.com/) (search for DFR0971)
 - [GP8403 Datasheet](https://www.dfrobot.com/) (check product page for datasheet link)
 
+## Credits
+
+This ESP-IDF driver implementation is based on and references the DFRobot_GP8403 Arduino library:
+- **Original Library**: [DFRobot_GP8403](https://github.com/DFRobot/DFRobot_GP8403)
+- **Original Author**: tangjie (jie.tang@dfrobot.com)
+- **License**: MIT License
+
 ## License
 
 Copyright (c) 2025, Adam G. Sweeney
+
+Portions of this code reference the DFRobot_GP8403 Arduino library:
+Copyright (c) 2022 DFRobot (https://github.com/DFRobot/DFRobot_GP8403)
+Written by tangjie (jie.tang@dfrobot.com)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
