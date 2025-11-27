@@ -400,8 +400,7 @@ esp_err_t lsm6ds3_read_accel(lsm6ds3_handle_t *handle, float accel_mg[3])
     
     // First read logged silently (no console output)
     
-    // Debug: Log raw bytes frequently to diagnose the zero-read issue
-    static uint32_t debug_count = 0;
+    // Check if we got all zeros (which might indicate a problem)
     bool all_zeros = (data_raw_acceleration.u8bit[0] == 0 && data_raw_acceleration.u8bit[1] == 0 &&
                      data_raw_acceleration.u8bit[2] == 0 && data_raw_acceleration.u8bit[3] == 0 &&
                      data_raw_acceleration.u8bit[4] == 0 && data_raw_acceleration.u8bit[5] == 0);
